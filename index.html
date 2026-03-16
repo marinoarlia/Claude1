@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Address Validation Checker</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Address Validation Checker</h1>
+      <p class="subtitle">Verifica il tuo indirizzo su multiple piattaforme</p>
+    </header>
+
+    <section class="input-section">
+      <label for="address-input">Inserisci l'indirizzo completo</label>
+      <div class="input-row">
+        <textarea
+          id="address-input"
+          placeholder="Es: Via Roma 1, 20121 Milano MI"
+          rows="3"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <button id="validate-btn" onclick="validateAddress()">
+          <span class="btn-text">Verifica</span>
+          <span class="btn-icon">&#x2192;</span>
+        </button>
+      </div>
+      <p class="hint">
+        Formato suggerito: <strong>Via/Piazza Nome N°, CAP Città SI</strong> &nbsp;&bull;&nbsp;
+        Esempio: <em>Corso Buenos Aires 77, 20124 Milano MI</em>
+      </p>
+    </section>
+
+    <!-- API Keys config -->
+    <section class="config-section" id="config-section">
+      <button class="config-toggle" onclick="toggleConfig()">
+        <span id="config-arrow">&#x25BC;</span> Configura chiavi API (opzionale)
+      </button>
+      <div class="config-body" id="config-body" style="display:none">
+        <p class="config-note">
+          Senza chiavi API vengono usati solo i servizi gratuiti (Nominatim, api.address.gov.it).
+          Con le chiavi si abilitano Google Maps e HERE.
+        </p>
+        <div class="api-key-row">
+          <label for="google-key">Google Maps API Key</label>
+          <input type="password" id="google-key" placeholder="AIza..." autocomplete="off" />
+          <button onclick="saveKey('google')">Salva</button>
+        </div>
+        <div class="api-key-row">
+          <label for="here-key">HERE Geocoding API Key</label>
+          <input type="password" id="here-key" placeholder="your-here-key" autocomplete="off" />
+          <button onclick="saveKey('here')">Salva</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section class="results-section" id="results-section" style="display:none">
+      <h2>Risultati validazione</h2>
+      <div id="parsed-address" class="parsed-box"></div>
+      <div id="results-grid" class="results-grid"></div>
+      <div class="summary-box" id="summary-box"></div>
+    </section>
+
+    <!-- Loading -->
+    <div class="loading-overlay" id="loading" style="display:none">
+      <div class="spinner"></div>
+      <p>Verifica in corso...</p>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
