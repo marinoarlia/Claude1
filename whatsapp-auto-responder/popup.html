@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Auto Responder</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <header>
+    <span class="logo">🤖</span>
+    <h1>Auto Responder</h1>
+    <label class="toggle-switch" title="Attiva/Disattiva">
+      <input type="checkbox" id="toggleEnabled">
+      <span class="slider"></span>
+    </label>
+  </header>
+
+  <div id="statusBar" class="status-bar off">
+    <span id="statusText">Disattivato</span>
+  </div>
+
+  <!-- Tab bar -->
+  <nav class="tabs">
+    <button class="tab active" data-tab="ai">🤖 AI</button>
+    <button class="tab" data-tab="shop">🏪 Negozio</button>
+    <button class="tab" data-tab="behavior">💬 Risposte</button>
+  </nav>
+
+  <!-- ══════════ TAB: AI ══════════ -->
+  <div id="tab-ai" class="tab-panel active">
+
+    <section class="section">
+      <h2>Provider AI</h2>
+
+      <div class="field">
+        <label for="provider">Servizio</label>
+        <select id="provider">
+          <option value="claude">Claude (Anthropic) — consigliato</option>
+          <option value="openai">OpenAI (ChatGPT)</option>
+        </select>
+      </div>
+
+      <!-- Claude -->
+      <div id="claudeSection">
+        <div class="field">
+          <label for="claudeApiKey">API Key Claude</label>
+          <div class="input-wrapper">
+            <input type="password" id="claudeApiKey" placeholder="sk-ant-api03-…" autocomplete="off">
+            <button class="eye-btn" data-target="claudeApiKey" title="Mostra/Nascondi">👁</button>
+          </div>
+          <a class="link-hint" href="https://console.anthropic.com/" target="_blank">→ Ottieni API Key Anthropic</a>
+        </div>
+        <div class="field">
+          <label for="claudeModel">Modello</label>
+          <select id="claudeModel">
+            <option value="claude-haiku-4-5-20251001">Claude Haiku — veloce ed economico ✓</option>
+            <option value="claude-sonnet-4-6">Claude Sonnet — bilanciato</option>
+            <option value="claude-opus-4-6">Claude Opus — massima qualità</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- OpenAI -->
+      <div id="openaiSection" class="hidden">
+        <div class="field">
+          <label for="openaiApiKey">API Key OpenAI</label>
+          <div class="input-wrapper">
+            <input type="password" id="openaiApiKey" placeholder="sk-…" autocomplete="off">
+            <button class="eye-btn" data-target="openaiApiKey" title="Mostra/Nascondi">👁</button>
+          </div>
+          <a class="link-hint" href="https://platform.openai.com/api-keys" target="_blank">→ Ottieni API Key OpenAI</a>
+        </div>
+        <div class="field">
+          <label for="openaiModel">Modello</label>
+          <select id="openaiModel">
+            <option value="gpt-4o-mini">GPT-4o Mini — veloce ed economico ✓</option>
+            <option value="gpt-4o">GPT-4o — migliore qualità</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Ritardo risposta</h2>
+      <div class="field row">
+        <label>Secondi di attesa</label>
+        <div class="delay-inputs">
+          <div class="delay-group">
+            <span>min</span>
+            <input type="number" id="minDelay" min="1" max="30" step="0.5">
+            <span>s</span>
+          </div>
+          <span class="dash">—</span>
+          <div class="delay-group">
+            <span>max</span>
+            <input type="number" id="maxDelay" min="1" max="60" step="0.5">
+            <span>s</span>
+          </div>
+        </div>
+      </div>
+      <p class="hint">Attesa casuale tra min e max prima di rispondere (simula una persona reale)</p>
+    </section>
+
+  </div>
+
+  <!-- ══════════ TAB: NEGOZIO ══════════ -->
+  <div id="tab-shop" class="tab-panel hidden">
+
+    <section class="section">
+      <h2>Identità negozio</h2>
+
+      <div class="field">
+        <label for="businessName">Nome negozio / azienda</label>
+        <input type="text" id="businessName" placeholder="es. Edilstore, ModaMia, TechShop…">
+      </div>
+      <div class="field">
+        <label for="businessSector">Settore / tipo di attività</label>
+        <input type="text" id="businessSector" placeholder="es. e-commerce materiali edili, negozio abbigliamento online…">
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Prodotti e servizi</h2>
+      <div class="field">
+        <label for="productsDescription">Descrizione prodotti venduti</label>
+        <textarea id="productsDescription" rows="4"
+          placeholder="Elenca i tuoi prodotti e/o categorie principali. Più dettagli dai, migliori saranno le risposte.&#10;&#10;Esempio:&#10;- Vernici e smalti (interni/esterni)&#10;- Primer e fondo schiena&#10;- Rasanti e stucchi&#10;- Utensili per pittura&#10;Sito catalogo: www.mionegozio.it/catalogo"></textarea>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Spedizioni e consegne</h2>
+      <div class="field">
+        <label for="shippingPolicy">Politica spedizioni</label>
+        <textarea id="shippingPolicy" rows="3"
+          placeholder="Esempio:&#10;- Spedizione gratuita sopra 49€, altrimenti 5,90€&#10;- Corriere GLS/BRT, consegna in 2-3 giorni lavorativi&#10;- Ordini effettuati entro le 13:00 spediti il giorno stesso&#10;- Isole e zone disagiate: +1-2 giorni"></textarea>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Sconti e prezzi</h2>
+      <div class="field">
+        <label for="discountPolicy">Politica sconti</label>
+        <textarea id="discountPolicy" rows="3"
+          placeholder="Esempio:&#10;- Non effettuiamo sconti sul prezzo di listino&#10;- Codice sconto BENVENUTO10 per il primo ordine (-10%)&#10;- Sconto del 5% per ordini sopra 200€ (applica coupon OVER200)&#10;- Newsletter: -5% al primo acquisto"></textarea>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Altre informazioni</h2>
+      <div class="field">
+        <label for="extraInfo">Info aggiuntive (orari, resi, garanzie, ecc.)</label>
+        <textarea id="extraInfo" rows="3"
+          placeholder="Esempio:&#10;- Assistenza clienti: lun-ven 9:00-18:00&#10;- Resi accettati entro 30 giorni&#10;- Pagamento: carta, PayPal, bonifico&#10;- P.IVA: 12345678901"></textarea>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ══════════ TAB: RISPOSTE ══════════ -->
+  <div id="tab-behavior" class="tab-panel hidden">
+
+    <section class="section">
+      <h2>Messaggio di escalation</h2>
+      <p class="hint" style="margin-bottom:8px">
+        Usato quando l'AI non ha abbastanza info per rispondere (es. tracking specifico, preventivi, schede tecniche).
+      </p>
+      <div class="field">
+        <label for="escalationMessage">Testo da inviare</label>
+        <textarea id="escalationMessage" rows="3"
+          placeholder="es. Ti ricontatteremo al più presto con tutte le informazioni. Grazie per la pazienza!"></textarea>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Prompt manuale (avanzato)</h2>
+      <div class="field row">
+        <label for="useManualPrompt">Usa prompt personalizzato</label>
+        <label class="toggle-switch small">
+          <input type="checkbox" id="useManualPrompt">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <p class="hint" style="margin:6px 0 8px">Se attivo, sostituisce completamente il profilo negozio.</p>
+      <div id="manualPromptArea" class="hidden">
+        <div class="field">
+          <label for="manualSystemPrompt">System Prompt personalizzato</label>
+          <textarea id="manualSystemPrompt" rows="7"
+            placeholder="Scrivi le istruzioni complete per l'AI…"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Anteprima prompt generato</h2>
+      <p class="hint" style="margin-bottom:8px">Questo è il prompt che viene inviato all'AI (dal profilo negozio).</p>
+      <div id="promptPreview" class="prompt-preview">Compila il profilo negozio per vedere l'anteprima.</div>
+    </section>
+
+  </div>
+
+  <!-- Azioni -->
+  <div class="actions">
+    <button id="saveBtn" class="btn-primary">💾 Salva</button>
+    <button id="resetBtn" class="btn-secondary">↺ Reset</button>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+</div>
+<script src="popup.js"></script>
+</body>
+</html>
