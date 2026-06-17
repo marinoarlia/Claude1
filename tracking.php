@@ -169,12 +169,19 @@ function stato_badge(string $stato): string {
     return 'bg-secondary';
 }
 
-function progress_step(string $stato): int {
-    $stato = strtoupper($stato);
-    if (str_contains($stato, 'CONSEGN') && !str_contains($stato, 'IN CONSEGNA')) return 5;
+function progress_step(string $stato, bool $consegnata = false): int {
+    if ($consegnata) return 5;
+    $stato = strtoupper(trim($stato));
+    // Codici brevi BRT (stato_sped_parte1)
+    if (in_array($stato, ['CONS', '11', 'CONSEGNATA', 'DELIVERED'])) return 5;
+    if (in_array($stato, ['INC', 'IN CONS', 'IN CONSEGNA', 'OUT FOR DELIVERY'])) return 4;
+    if (in_array($stato, ['ARR', 'FILIALE', 'IN FILIALE', 'AT HUB'])) return 3;
+    if (in_array($stato, ['TRAN', 'TRANSIT', 'IN TRANSITO', 'IN VIAGGIO', 'IN TRANSIT'])) return 2;
+    // Controllo su testo esteso
+    if (str_contains($stato, 'CONSEGNAT') && !str_contains($stato, 'IN CONSEGNA')) return 5;
     if (str_contains($stato, 'IN CONSEGNA')) return 4;
-    if (str_contains($stato, 'FILIALE')) return 3;
-    if (str_contains($stato, 'TRANSIT') || str_contains($stato, 'VIAGGIO')) return 2;
+    if (str_contains($stato, 'FILIALE') || str_contains($stato, 'HUB')) return 3;
+    if (str_contains($stato, 'TRANSIT') || str_contains($stato, 'VIAGGIO') || str_contains($stato, 'TRAN')) return 2;
     return 1;
 }
 
@@ -227,9 +234,25 @@ if ($searchMode === 'soap' && $risultato) {
     $soapEventi = $risultato['eventi'] ?? [];
 }
 
-$statoRaw = $datiSped['descrizione_stato_sped_parte1'] ?? ($soapData['stato_spedizione'] ?? '');
-$step     = progress_step($statoRaw);
-$steps    = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Consegnata'];
+// Derivazione stato: priorità a data_consegna_merce, poi descrizione, poi codice corto
+$isConsegnata = !empty($datiCons['data_consegna_merce']);
+if ($isConsegnata) {
+    $statoRaw = 'Consegnata';
+} elseif (!empty($datiSped['descrizione_stato_sped_parte1'])) {
+    $statoRaw = trim($datiSped['descrizione_stato_sped_parte1']);
+    if (!empty($datiSped['descrizione_stato_sped_parte2'])) {
+        $statoRaw .= ' ' . trim($datiSped['descrizione_stato_sped_parte2']);
+    }
+} elseif (!empty($datiSped['stato_sped_parte1'])) {
+    $statoRaw = trim($datiSped['stato_sped_parte1']);
+    if (!empty($datiSped['stato_sped_parte2'])) {
+        $statoRaw .= ' ' . trim($datiSped['stato_sped_parte2']);
+    }
+} else {
+    $statoRaw = $soapData['stato_spedizione'] ?? '';
+}
+$step  = progress_step($statoRaw, $isConsegnata);
+$steps = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Consegnata'];
 ?>
 <!DOCTYPE html>
 <html lang="it">
@@ -298,6 +321,7 @@ $steps    = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Conse
             z-index: 0;
         }
         .step-wrap.done:not(:last-child)::after { background: var(--brt-red); }
+        .step-wrap.active:not(:last-child)::after { background: var(--brt-red); }
         .step-icon {
             width: 38px; height: 38px;
             border-radius: 50%;
@@ -447,7 +471,12 @@ $steps    = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Conse
                         $icons = ['fa-truck-ramp-box','fa-truck','fa-warehouse','fa-person-biking','fa-circle-check'];
                         foreach ($steps as $i => $s):
                             $n = $i + 1;
-                            $cls = $n < $step ? 'done' : ($n === $step ? 'active' : '');
+                            if ($step === 5) {
+                                // Tutti completati: 1-4 done, 5 active
+                                $cls = $n < 5 ? 'done' : 'active';
+                            } else {
+                                $cls = $n < $step ? 'done' : ($n === $step ? 'active' : '');
+                            }
                         ?>
                         <div class="step-wrap <?= $cls ?>">
                             <div class="step-icon"><i class="fa-solid <?= $icons[$i] ?>"></i></div>
@@ -474,6 +503,25 @@ $steps    = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Conse
     </div>
 
     <!-- Mittente / Destinatario -->
+    <?php
+    // Helper: costruisce stringa indirizzo completa
+    function build_address(array $rec, string $prov_key = 'sigla_area'): string {
+        $parts = [];
+        if (!empty($rec['indirizzo'])) $parts[] = $rec['indirizzo'];
+        $city = trim(($rec['cap'] ?? '') . ' ' . ($rec['localita'] ?? ''));
+        if ($city) {
+            $prov = $rec[$prov_key] ?? $rec['sigla_area'] ?? $rec['sigla_provincia'] ?? '';
+            if ($prov) $city .= ' (' . $prov . ')';
+            $parts[] = $city;
+        }
+        if (!empty($rec['sigla_nazione']) && $rec['sigla_nazione'] !== 'IT') {
+            $parts[] = $rec['sigla_nazione'];
+        }
+        return implode(', ', $parts);
+    }
+    $mittAddr = build_address($mittente, 'sigla_area');
+    $destAddr = build_address($destinatario, 'sigla_provincia');
+    ?>
     <div class="row g-3 mb-3">
         <div class="col-md-6">
             <div class="card info-card h-100">
@@ -481,70 +529,99 @@ $steps    = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Conse
                     <i class="fa-solid fa-building me-2 text-danger"></i>Mittente
                 </div>
                 <div class="card-body">
-                    <div class="row g-2">
-                        <div class="col-12">
-                            <div class="info-label">Ragione sociale</div>
-                            <div class="info-value"><?= e($mittente['ragione_sociale'] ?? '-') ?></div>
-                        </div>
-                        <div class="col-12">
-                            <div class="info-label">Indirizzo</div>
-                            <div class="info-value">
-                                <?= e($mittente['indirizzo'] ?? '') ?>
-                                <?php if (!empty($mittente['cap']) || !empty($mittente['localita'])): ?>
-                                <br><?= e($mittente['cap'] ?? '') ?> <?= e($mittente['localita'] ?? '') ?>
-                                <?php if (!empty($mittente['sigla_area'])): ?>
-                                (<?= e($mittente['sigla_area']) ?>)
-                                <?php endif; ?>
-                                <?php endif; ?>
-                            </div>
+                    <?php if (!empty($mittente['ragione_sociale'])): ?>
+                    <div class="mb-2">
+                        <div class="info-label">Ragione sociale</div>
+                        <div class="info-value fw-bold"><?= e($mittente['ragione_sociale']) ?></div>
+                    </div>
+                    <?php endif; ?>
+                    <?php if (!empty($mittente['codice'])): ?>
+                    <div class="mb-2">
+                        <div class="info-label">Codice cliente</div>
+                        <div class="info-value"><?= e($mittente['codice']) ?></div>
+                    </div>
+                    <?php endif; ?>
+                    <?php if ($mittAddr): ?>
+                    <div class="mb-2">
+                        <div class="info-label">Indirizzo</div>
+                        <div class="info-value">
+                            <?php if (!empty($mittente['indirizzo'])): ?>
+                            <?= e($mittente['indirizzo']) ?><br>
+                            <?php endif; ?>
+                            <?php
+                            $cityLine = trim(($mittente['cap'] ?? '') . ' ' . ($mittente['localita'] ?? ''));
+                            $prov = $mittente['sigla_area'] ?? '';
+                            if ($cityLine): ?>
+                            <strong><?= e($cityLine) ?><?= $prov ? ' (' . e($prov) . ')' : '' ?></strong>
+                            <?php endif; ?>
+                            <?php if (!empty($mittente['sigla_nazione']) && $mittente['sigla_nazione'] !== 'IT'): ?>
+                            — <?= e($mittente['sigla_nazione']) ?>
+                            <?php endif; ?>
                         </div>
                     </div>
+                    <?php else: ?>
+                    <div class="text-muted small"><i class="fa-solid fa-info-circle me-1"></i>Indirizzo non disponibile</div>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
 
         <div class="col-md-6">
             <div class="card info-card h-100">
-                <div class="card-header">
-                    <i class="fa-solid fa-user me-2 text-danger"></i>Destinatario
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="fa-solid fa-user me-2 text-danger"></i>Destinatario</span>
+                    <?php if ($destAddr): ?>
+                    <a href="https://www.google.com/maps/search/<?= urlencode($destAddr) ?>" target="_blank"
+                       class="btn btn-sm btn-outline-secondary" title="Apri in Google Maps">
+                        <i class="fa-solid fa-map-location-dot"></i>
+                    </a>
+                    <?php endif; ?>
                 </div>
                 <div class="card-body">
-                    <div class="row g-2">
-                        <div class="col-12">
-                            <div class="info-label">Ragione sociale</div>
-                            <div class="info-value"><?= e($destinatario['ragione_sociale'] ?? '-') ?></div>
+                    <?php if (!empty($destinatario['ragione_sociale'])): ?>
+                    <div class="mb-2">
+                        <div class="info-label">Ragione sociale / Nome</div>
+                        <div class="info-value fw-bold"><?= e($destinatario['ragione_sociale']) ?></div>
+                    </div>
+                    <?php endif; ?>
+                    <?php if ($destAddr): ?>
+                    <div class="mb-2">
+                        <div class="info-label">Indirizzo</div>
+                        <div class="info-value">
+                            <?php if (!empty($destinatario['indirizzo'])): ?>
+                            <?= e($destinatario['indirizzo']) ?><br>
+                            <?php endif; ?>
+                            <?php
+                            $cityLine = trim(($destinatario['cap'] ?? '') . ' ' . ($destinatario['localita'] ?? ''));
+                            $prov = $destinatario['sigla_provincia'] ?? '';
+                            if ($cityLine): ?>
+                            <strong><?= e($cityLine) ?><?= $prov ? ' (' . e($prov) . ')' : '' ?></strong>
+                            <?php endif; ?>
+                            <?php if (!empty($destinatario['sigla_nazione']) && $destinatario['sigla_nazione'] !== 'IT'): ?>
+                            — <?= e($destinatario['sigla_nazione']) ?>
+                            <?php endif; ?>
                         </div>
-                        <div class="col-12">
-                            <div class="info-label">Indirizzo</div>
-                            <div class="info-value">
-                                <?= e($destinatario['indirizzo'] ?? '') ?>
-                                <?php if (!empty($destinatario['cap']) || !empty($destinatario['localita'])): ?>
-                                <br><?= e($destinatario['cap'] ?? '') ?> <?= e($destinatario['localita'] ?? '') ?>
-                                <?php if (!empty($destinatario['sigla_provincia'])): ?>
-                                (<?= e($destinatario['sigla_provincia']) ?>)
-                                <?php endif; ?>
-                                <?php if (!empty($destinatario['sigla_nazione'])): ?>
-                                — <?= e($destinatario['sigla_nazione']) ?>
-                                <?php endif; ?>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                        <?php if (!empty($destinatario['telefono_referente'])): ?>
-                        <div class="col-12">
-                            <div class="info-label">Telefono</div>
-                            <div class="info-value">
+                    </div>
+                    <?php else: ?>
+                    <div class="text-muted small"><i class="fa-solid fa-info-circle me-1"></i>Indirizzo non disponibile</div>
+                    <?php endif; ?>
+                    <?php if (!empty($destinatario['referente_consegna'])): ?>
+                    <div class="mb-2">
+                        <div class="info-label">Referente</div>
+                        <div class="info-value"><?= e($destinatario['referente_consegna']) ?></div>
+                    </div>
+                    <?php endif; ?>
+                    <?php if (!empty($destinatario['telefono_referente'])): ?>
+                    <div class="mb-2">
+                        <div class="info-label">Telefono</div>
+                        <div class="info-value">
+                            <a href="tel:<?= e($destinatario['telefono_referente']) ?>" class="text-decoration-none">
                                 <i class="fa-solid fa-phone fa-xs me-1 text-muted"></i>
                                 <?= e($destinatario['telefono_referente']) ?>
-                            </div>
+                            </a>
                         </div>
-                        <?php endif; ?>
-                        <?php if (!empty($destinatario['referente_consegna'])): ?>
-                        <div class="col-12">
-                            <div class="info-label">Referente consegna</div>
-                            <div class="info-value"><?= e($destinatario['referente_consegna']) ?></div>
-                        </div>
-                        <?php endif; ?>
                     </div>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -679,6 +756,18 @@ $steps    = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Conse
             <div id="chartWrap">
                 <canvas id="statiChart"></canvas>
             </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
+    <!-- Debug panel -->
+    <?php if (!empty($_GET['debug']) && $risultato): ?>
+    <div class="card info-card mb-4 border border-warning">
+        <div class="card-header bg-warning text-dark">
+            <i class="fa-solid fa-bug me-2"></i>Debug — Risposta grezza API BRT
+        </div>
+        <div class="card-body p-0">
+            <pre style="max-height:400px;overflow:auto;font-size:.75rem;padding:1rem;margin:0"><?= e(json_encode($risultato, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) ?></pre>
         </div>
     </div>
     <?php endif; ?>
