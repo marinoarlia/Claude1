@@ -2,8 +2,12 @@
 // ============================================================
 // Configurazione credenziali BRT
 // ============================================================
-define('BRT_USER_ID',  getenv('BRT_USER_ID')  ?: 'YOUR_USER_ID');
-define('BRT_PASSWORD', getenv('BRT_PASSWORD') ?: 'YOUR_PASSWORD');
+@include __DIR__ . '/.env.php';
+
+if (!defined('BRT_USER_ID') || BRT_USER_ID === 'YOUR_USER_ID') {
+    $credentialsWarning = 'Le credenziali BRT non sono configurate. Modifica il file <code>.env.php</code> con le tue credenziali.';
+}
+
 define('BRT_API_BASE', 'https://api.brt.it/rest/v1/tracking/parcelID/');
 
 // ============================================================
@@ -12,6 +16,10 @@ define('BRT_API_BASE', 'https://api.brt.it/rest/v1/tracking/parcelID/');
 function brt_tracking_rest(string $parcelId): array {
     if (empty($parcelId)) {
         return ['error' => 'ID collo non fornito.'];
+    }
+
+    if (BRT_USER_ID === 'YOUR_USER_ID' || BRT_PASSWORD === 'YOUR_PASSWORD') {
+        return ['error' => 'Credenziali BRT non configurate. Modifica .env.php con le tue credenziali.'];
     }
 
     $url = BRT_API_BASE . urlencode($parcelId);
@@ -36,19 +44,23 @@ function brt_tracking_rest(string $parcelId): array {
         return ['error' => 'Errore di connessione: ' . $curlError];
     }
     if ($httpCode !== 200) {
-        return ['error' => 'Risposta HTTP ' . $httpCode . ' dal server BRT.'];
+        $msg = 'Risposta HTTP ' . $httpCode . ' dal server BRT.';
+        if ($httpCode === 401) $msg .= ' Credenziali non valide.';
+        if ($httpCode === 404) $msg .= ' ID collo non trovato.';
+        return ['error' => $msg];
     }
 
     $data = json_decode($response, true);
     if (json_last_error() !== JSON_ERROR_NONE) {
-        return ['error' => 'Risposta non valida dal server BRT.'];
+        return ['error' => 'Risposta non valida dal server BRT: ' . json_last_error_msg()];
     }
 
     // Controllo esito
     $execMsg = $data['executionMessage'] ?? null;
     if ($execMsg && isset($execMsg['code']) && (int)$execMsg['code'] < 0) {
         $desc = $execMsg['codeDesc'] ?? 'Errore sconosciuto';
-        return ['error' => 'BRT: ' . $desc];
+        $detail = $execMsg['message'] ?? '';
+        return ['error' => 'BRT: ' . $desc . ($detail ? ' (' . $detail . ')' : '')];
     }
 
     return $data;
@@ -336,6 +348,19 @@ $steps    = ['Affidate a BRT', 'In viaggio', 'In filiale', 'In consegna', 'Conse
 </nav>
 
 <div class="container pb-5">
+
+    <!-- ===================== CREDENZIALI ALERT ===================== -->
+    <?php if (!empty($credentialsWarning)): ?>
+    <div class="alert alert-danger d-flex align-items-start mb-4" role="alert">
+        <i class="fa-solid fa-exclamation-circle fa-lg me-3 mt-1 flex-shrink-0"></i>
+        <div>
+            <strong>⚠️ Credenziali non configurate</strong><br>
+            <?= $credentialsWarning ?><br><br>
+            <code>.env.php</code> deve contenere:
+            <pre style="background:#f8f9fa;padding:8px;border-radius:4px;margin-top:8px"><small>define('BRT_USER_ID',  'la_tua_user_id');<br>define('BRT_PASSWORD', 'la_tua_password');</small></pre>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <!-- ===================== FORM RICERCA ===================== -->
     <div class="row justify-content-center mb-4">
