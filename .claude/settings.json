@@ -1,0 +1,6 @@
+{
+  "env": {
+    "BRT_USER_ID": "YOUR_USER_ID",
+    "BRT_PASSWORD": "YOUR_PASSWORD"
+  }
+}
