@@ -1,0 +1,6 @@
+{
+  "name": "BRT Tracking Dashboard",
+  "description": "Dashboard per tracciare spedizioni BRT con simulatore di API, visualizzatore di tutti i 22 campi richiesti, grafici e generazione automatica dello script PHP ottimizzato per server FTP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
