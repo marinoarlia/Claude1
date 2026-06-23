@@ -12,29 +12,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit();
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); echo json_encode(['success'=>false,'message'=>'Metodo non consentito']); exit(); }
 
 $body = json_decode(file_get_contents('php://input'), true);
-$parcelID   = isset($body['parcelID'])   ? trim($body['parcelID'])   : '';
-$userID     = isset($body['userID'])     ? trim($body['userID'])     : '';
-$password   = isset($body['password'])   ? trim($body['password'])   : '';
-$useSandbox = isset($body['useSandbox']) ? (bool)$body['useSandbox'] : true;
+$parcelID = isset($body['parcelID']) ? trim($body['parcelID']) : '';
+$userID   = isset($body['userID'])   ? trim($body['userID'])   : '';
+$password = isset($body['password']) ? trim($body['password']) : '';
 
 if ($parcelID === '') { http_response_code(403); echo json_encode(['success'=>false,'message'=>"Il codice segnacollo è obbligatorio."]); exit(); }
+if (!$userID || !$password) { http_response_code(401); echo json_encode(['success'=>false,'message'=>"Inserire UserID e Password BRT REST API per tracciare le spedizioni."]); exit(); }
 
 $clean = $parcelID;
 $isNumeric = (bool)preg_match('/^\d{7,15}$/', $clean);
-$looksReal = $isNumeric && strpos($clean, '12345') !== 0;
+$looksReal = $isNumeric;
 
 // Include CSV lookup (silenzioso: non blocca in caso di errore)
 require_once __DIR__ . '/csv-lookup.php';
 
-// 1. Sandbox/demo → mock diretto (SOAP non restituisce referente_consegna né note_consegna)
-if ($useSandbox || !$userID || !$password) {
-    $mockResult = mockData($clean);
-    $mockResult['fonte_dati'] = 'mock';
-    echo json_encode($mockResult);
-    exit();
-}
-
-// 2. BRT REST API (solo con credenziali reali)
+// 1. BRT REST API
 $ch = curl_init('https://api.brt.it/rest/v1/tracking/parcelID/'.urlencode($clean));
 curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_HTTPHEADER=>["userID: $userID","password: $password","Accept: application/json"],CURLOPT_TIMEOUT=>10,CURLOPT_SSL_VERIFYPEER=>true]);
 $resp = curl_exec($ch); $httpCode = curl_getinfo($ch,CURLINFO_HTTP_CODE); $err=curl_error($ch); curl_close($ch);
@@ -43,7 +35,7 @@ $json = $resp ? json_decode($resp,true) : null;
 $hasError = true;
 if ($json) { $b=$json['parcelIDResult']??$json['ttParcelIdResponse']??$json; $c=isset($b['executionMessage']['code'])?(int)$b['executionMessage']['code']:(isset($b['code'])?(int)$b['code']:0); $hasError=$c<0; }
 
-// 3. SOAP fallback solo se REST fallisce (con credenziali reali)
+// 2. SOAP fallback solo se REST fallisce
 if (($httpCode!==200||$hasError||!$json)&&$looksReal) {
     $soap=fetchSoap($clean);
     if ($soap&&$soap['success']&&count($soap['lista_eventi'])>0){
@@ -61,11 +53,6 @@ echo json_encode($restResult);
 
 // ── FUNZIONI ──────────────────────────────────────────────────────────────────
 
-/**
- * Arricchisce il risultato con i dati CSV SFTP se disponibili.
- * Se trova il collo nel CSV, sovrascrive i campi destinatario (non mascherati GDPR)
- * e aggiunge numero_ordine, note_consegna da CSV, fonte_dati.
- */
 function enrichWithCsv(array $result, string $parcelId): array {
     try {
         $csvData = lookupParcelInCsv($parcelId);
@@ -75,24 +62,20 @@ function enrichWithCsv(array $result, string $parcelId): array {
     }
 
     if ($csvData === null) {
-        // Nessun dato CSV: fonte solo API
         $result['fonte_dati'] = 'api';
         return $result;
     }
 
-    // Sovrascrivi i campi destinatario con dati completi dal CSV
     if ($csvData['ragione_sociale'] !== '') $result['ragione_sociale'] = $csvData['ragione_sociale'];
     if ($csvData['indirizzo']       !== '') $result['indirizzo']       = $csvData['indirizzo'];
     if ($csvData['cap']             !== '') $result['cap']             = $csvData['cap'];
     if ($csvData['localita']        !== '') $result['localita']        = $csvData['localita'];
     if ($csvData['sigla_provincia'] !== '') $result['sigla_provincia'] = $csvData['sigla_provincia'];
 
-    // Aggiungi numero ordine
     if (!empty($csvData['numero_ordine'])) {
         $result['numero_ordine'] = $csvData['numero_ordine'];
     }
 
-    // Aggiungi/integra note consegna CSV
     $notaCSV = trim($csvData['note_consegna_csv'] ?? '');
     if ($notaCSV !== '') {
         $existingNotes = $result['note_consegna'] ?? [];
@@ -142,15 +125,4 @@ function parseRest(array $data,string $id):array{
     $rawNotes=$b['lista_note']??$rb['lista_note']??[];if(!is_array($rawNotes))$rawNotes=$rawNotes?[$rawNotes]:[];
     $note_consegna=array_values(array_filter(array_map(fn($n)=>trim($n['nota']['descrizione']??$n['descrizione']??''),$rawNotes)));
     return ['parcelID'=>$id,'success'=>$code>=0,'code'=>$code,'severity'=>$rb['severity']??'INFO','codeDesc'=>$rb['codeDesc']??'','message'=>$rb['message']??'','ragione_sociale'=>$dest['ragione_sociale']??'','indirizzo'=>$dest['indirizzo']??'','cap'=>$dest['cap']??'','localita'=>$dest['localita']??'','sigla_provincia'=>$dest['sigla_provincia']??'','sigla_nazione'=>$dest['sigla_nazione']??'IT','referente_consegna'=>$dest['referente_consegna']??'','telefono_referente'=>$dest['telefono_referente']??'','note_consegna'=>$note_consegna,'ragione_sociale_mittente'=>$mit['ragione_sociale']??'','indirizzo_mittente'=>$mit['indirizzo']??'','cap_mittente'=>$mit['cap']??'','localita_mittente'=>$mit['localita']??'','sigla_provincia_mittente'=>$mit['sigla_provincia']??'','sigla_nazione_mittente'=>$mit['sigla_nazione']??'IT','telefono_mittente'=>$mit['telefono']??'','colli'=>isset($m['colli'])?(int)$m['colli']:0,'peso_kg'=>isset($m['peso_kg'])?(float)$m['peso_kg']:0.0,'riferimento_mittente_numerico'=>isset($r['riferimento_mittente_numerico'])?(int)$r['riferimento_mittente_numerico']:0,'riferimento_mittente_alfabetico'=>$r['riferimento_mittente_alfabetico']??'','data_cons_richiesta'=>$d['data_cons_richiesta']??'','ora_cons_richiesta'=>$d['ora_cons_richiesta']??'','tipo_cons_richiesta'=>$d['tipo_cons_richiesta']??'','descrizione_cons_richiesta'=>$d['descrizione_cons_richiesta']??'','data_teorica_consegna'=>$d['data_teorica_consegna']??'','ora_teorica_consegna_da'=>$d['ora_teorica_consegna_da']??'','ora_teorica_consegna_a'=>$d['ora_teorica_consegna_a']??'','data_consegna_merce'=>$d['data_consegna_merce']??'','ora_consegna_merce'=>$d['ora_consegna_merce']??'','firmatario_consegna'=>$d['firmatario_consegna']??'','lista_eventi'=>$ev,'stato_sped_parte1'=>$rb['stato_sped_parte1']??$b['stato_sped_parte1']??'','stato_sped_parte2'=>$rb['stato_sped_parte2']??$b['stato_sped_parte2']??'','descrizione_stato_sped_parte1'=>$rb['descrizione_stato_sped_parte1']??$b['descrizione_stato_sped_parte1']??'','descrizione_stato_sped_parte2'=>$rb['descrizione_stato_sped_parte2']??$b['descrizione_stato_sped_parte2']??'','originalPayload'=>$data];
-}
-
-function mockData(string $id):array{
-    $n=strtoupper(trim($id));
-    $mock=['08459100301718'=>['success'=>true,'code'=>0,'severity'=>'INFO','codeDesc'=>'Spedizione consegnata con successo','message'=>'La spedizione è stata consegnata.','ragione_sociale'=>'ABATE GIORGIO','indirizzo'=>'VIA FRANCESCO REDI 58','cap'=>'93012','localita'=>'GELA','sigla_provincia'=>'CL','sigla_nazione'=>'IT','referente_consegna'=>'ABATE GIORGIO','telefono_referente'=>'+393495806585','note_consegna'=>['Consegnare al piano terra','Chiamare prima della consegna'],'ragione_sociale_mittente'=>'ARLIA SRL','indirizzo_mittente'=>'VIA FRAILLITI SNC','cap_mittente'=>'87030','localita_mittente'=>'LONGOBARDI','sigla_provincia_mittente'=>'CS','sigla_nazione_mittente'=>'IT','telefono_mittente'=>'+39098278131','colli'=>1,'peso_kg'=>0,'riferimento_mittente_numerico'=>88151,'riferimento_mittente_alfabetico'=>'brt-marco2','data_cons_richiesta'=>'16.06.2026','ora_cons_richiesta'=>'Qualsiasi ora','tipo_cons_richiesta'=>'Standard','descrizione_cons_richiesta'=>'Nessun vincolo inserito','data_teorica_consegna'=>'16.06.2026','ora_teorica_consegna_da'=>'08:30','ora_teorica_consegna_a'=>'18:30','data_consegna_merce'=>'16.06.2026','ora_consegna_merce'=>'15:40','firmatario_consegna'=>'ABATE GIORGIO','stato_sped_parte1'=>'CONSEGNATA','stato_sped_parte2'=>'OK','descrizione_stato_sped_parte1'=>'Spedizione consegnata con successo','descrizione_stato_sped_parte2'=>'Consegnata','lista_eventi'=>[['data'=>'16.06.2026','ora'=>'18:47:25','id'=>'POD','descrizione'=>'Abbiamo ricevuto la prova di consegna','filiale'=>''],['data'=>'16.06.2026','ora'=>'15:40:10','id'=>'DEL','descrizione'=>'La spedizione è stata consegnata','filiale'=>'Caltanissetta, IT'],['data'=>'16.06.2026','ora'=>'10:39:59','id'=>'O4D','descrizione'=>'La spedizione è in consegna','filiale'=>'Caltanissetta, IT'],['data'=>'16.06.2026','ora'=>'08:32:45','id'=>'ARR','descrizione'=>'La spedizione è presso la filiale di consegna','filiale'=>'Caltanissetta, IT']]]];
-    if(isset($mock[$n]))return array_merge(['parcelID'=>$id],$mock[$n]);
-    $del=str_starts_with($n,'BRT')||(strlen($n)%2===0);
-    $tr=str_contains($n,'TR')||(strlen($n)%3===1);
-    if($del)return['parcelID'=>$id,'success'=>true,'code'=>0,'severity'=>'INFO','codeDesc'=>'Esito Positivo','message'=>'Spedizione recapitata regolarmente.','ragione_sociale'=>"Ditta Automatica SpA ($id)",'indirizzo'=>'Viale dei Ciliegi, 204','cap'=>'00185','localita'=>'Roma','sigla_provincia'=>'RM','sigla_nazione'=>'IT','referente_consegna'=>'Dott. Giovanni Verga','telefono_referente'=>'+39 06 11223344','note_consegna'=>['Consegnare in portineria'],'colli'=>2,'peso_kg'=>14.8,'riferimento_mittente_numerico'=>554321,'riferimento_mittente_alfabetico'=>'DYN-'.substr($n,-4),'data_cons_richiesta'=>'2026-06-16','ora_cons_richiesta'=>'10:00','tipo_cons_richiesta'=>'standard','descrizione_cons_richiesta'=>'Suonare al civico 10 se cancello chiuso','data_teorica_consegna'=>'2026-06-17','ora_teorica_consegna_da'=>'10:00','ora_teorica_consegna_a'=>'12:00','data_consegna_merce'=>'2026-06-17','ora_consegna_merce'=>'11:22','firmatario_consegna'=>'G. Verga (Portineria)','stato_sped_parte1'=>'CONSEGNATA','stato_sped_parte2'=>'OK','descrizione_stato_sped_parte1'=>'Consegnata','descrizione_stato_sped_parte2'=>'Consegna completata','lista_eventi'=>[['data'=>'2026-06-17','ora'=>'11:22','id'=>'DEL','descrizione'=>'MERCE CONSEGNATA CON SUCCESSO','filiale'=>'ROMA LAURENTINA'],['data'=>'2026-06-17','ora'=>'07:55','id'=>'O4D','descrizione'=>'COLLI IN CONSEGNA CON AUTISTA','filiale'=>'ROMA LAURENTINA'],['data'=>'2026-06-17','ora'=>'02:14','id'=>'ARR','descrizione'=>'ARRIVATA PRESSO FILIALE DI ARRIVO','filiale'=>'ROMA LAURENTINA'],['data'=>'2026-06-16','ora'=>'21:30','id'=>'HUB','descrizione'=>'IN VIAGGIO TRA CENTRI OPERATIVI','filiale'=>'MILANO HUB'],['data'=>'2026-06-16','ora'=>'18:05','id'=>'PUG','descrizione'=>'ACCETTATA E DOCUMENTATA','filiale'=>'MILANO BOVISA']]];
-    if($tr)return['parcelID'=>$id,'success'=>true,'code'=>0,'severity'=>'INFO','codeDesc'=>'In Transito','message'=>'In transito.','ragione_sociale'=>"Studio Paladini ($id)",'indirizzo'=>'Piazza Garibaldi, 12','cap'=>'70122','localita'=>'Bari','sigla_provincia'=>'BA','sigla_nazione'=>'IT','referente_consegna'=>'Ing. Paola Paladini','telefono_referente'=>'+39 080 334455','note_consegna'=>[],'colli'=>1,'peso_kg'=>3.1,'riferimento_mittente_numerico'=>981240,'riferimento_mittente_alfabetico'=>'BRT-SHIP-'.substr($n,-3),'data_cons_richiesta'=>'','ora_cons_richiesta'=>'','tipo_cons_richiesta'=>'standard','descrizione_cons_richiesta'=>'','data_teorica_consegna'=>'2026-06-18','ora_teorica_consegna_da'=>'09:00','ora_teorica_consegna_a'=>'18:00','data_consegna_merce'=>'','ora_consegna_merce'=>'','firmatario_consegna'=>'','stato_sped_parte1'=>'IN VIAGGIO','stato_sped_parte2'=>'IN ORARIO','descrizione_stato_sped_parte1'=>'Spedizione in viaggio','descrizione_stato_sped_parte2'=>'Regolare','lista_eventi'=>[['data'=>'2026-06-17','ora'=>'04:12','id'=>'HUB','descrizione'=>'IN COMMUTAZIONE HUB LOGISTICO','filiale'=>'ANCONA HUB'],['data'=>'2026-06-16','ora'=>'19:00','id'=>'DEP','descrizione'=>'PARTENZA DA FILIALE','filiale'=>'BOLOGNA ROVERI'],['data'=>'2026-06-16','ora'=>'14:22','id'=>'PUG','descrizione'=>'CARICATO ALLA PARTENZA','filiale'=>'BOLOGNA ROVERI']]];
-    return['parcelID'=>$id,'success'=>false,'code'=>-10,'severity'=>'ERROR','codeDesc'=>'Non Trovato','message'=>"Il segnacollo $id non è stato trovato.",'ragione_sociale'=>'','indirizzo'=>'','cap'=>'','localita'=>'','sigla_provincia'=>'','sigla_nazione'=>'','referente_consegna'=>'','telefono_referente'=>'','note_consegna'=>[],'colli'=>0,'peso_kg'=>0,'riferimento_mittente_numerico'=>0,'riferimento_mittente_alfabetico'=>'','data_cons_richiesta'=>'','ora_cons_richiesta'=>'','tipo_cons_richiesta'=>'','descrizione_cons_richiesta'=>'','data_teorica_consegna'=>'','ora_teorica_consegna_da'=>'','ora_teorica_consegna_a'=>'','data_consegna_merce'=>'','ora_consegna_merce'=>'','firmatario_consegna'=>'','lista_eventi'=>[]];
 }

@@ -40,10 +40,9 @@ import PhpGenerator from "./components/PhpGenerator";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<"dashboard" | "php">("dashboard");
-  const [parcelID, setParcelID] = useState("08459100301718");
+  const [parcelID, setParcelID] = useState("");
   const [userID, setUserID] = useState("");
   const [password, setPassword] = useState("");
-  const [useSandbox, setUseSandbox] = useState(true);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BrtTrackingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,9 +57,16 @@ export default function App() {
   const [enrichTelefono, setEnrichTelefono] = useState("");
   const [showEnrichPanel, setShowEnrichPanel] = useState(false);
 
-  // Automated search when mounting to show beautiful pre-loaded dashboard
+  // Carica credenziali salvate dal browser
   useEffect(() => {
-    handleSearch();
+    try {
+      const saved = localStorage.getItem("brt_credentials");
+      if (saved) {
+        const { userID: u, password: p } = JSON.parse(saved);
+        if (u) setUserID(u);
+        if (p) setPassword(p);
+      }
+    } catch {}
   }, []);
 
   const handleSearch = async (e?: React.FormEvent, overrideId?: string) => {
@@ -85,7 +91,6 @@ export default function App() {
           parcelID: searchId.trim(),
           userID,
           password,
-          useSandbox,
         }),
       });
 
@@ -132,11 +137,6 @@ export default function App() {
     setShowEnrichPanel(false);
   };
 
-  const handleQuickPreset = (id: string, sandbox: boolean = true) => {
-    setParcelID(id);
-    setUseSandbox(sandbox);
-    handleSearch(undefined, id);
-  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans selection:bg-red-500 selection:text-white">
@@ -167,7 +167,7 @@ export default function App() {
                 }`}
               >
                 <Activity className="h-4 w-4" />
-                Dashboard <span className="hidden sm:inline">di Prova</span>
+                Dashboard
               </button>
               <button
                 onClick={() => setActiveTab("php")}
@@ -196,11 +196,10 @@ export default function App() {
           </div>
           <div className="relative z-10 max-w-3xl">
             <h2 className="text-xl sm:text-2xl font-black tracking-tight flex items-center gap-2">
-              Strumento di Collaudo & Generatore PHP BRT
+              Tracking BRT Bartolini
             </h2>
             <p className="text-xs sm:text-sm text-red-100/90 mt-2 leading-relaxed">
-              Questo applicativo simula e interroga l'endpoint REST reale di BRT Bartolini. Sotto la scheda 
-              <strong> "Script PHP per FTP"</strong> troverai l'intero file pronto da scaricare e mettere sul tuo host FTP: è pre-costruito, supporta Bootstrap 5, Font Awesome, DataTables avanzate e grafici Chart.js.
+              Inserisci le credenziali BRT REST API e cerca un ID collo per visualizzare lo stato della spedizione in tempo reale, arricchito con i dati completi dal file CSV giornaliero SFTP.
             </p>
           </div>
         </div>
@@ -223,8 +222,6 @@ export default function App() {
               setUserID={setUserID}
               password={password}
               setPassword={setPassword}
-              useSandbox={useSandbox}
-              setUseSandbox={setUseSandbox}
             />
 
             {/* BARRA DI RICERCA */}
@@ -237,7 +234,7 @@ export default function App() {
                     </span>
                     <input
                       type="text"
-                      placeholder="Inserisci l'ID collo o un ID di prova (es: BRT-OK-CONSEGNATO)..."
+                      placeholder="Inserisci l'ID collo BRT (es: 08459100301718)..."
                       value={parcelID}
                       onChange={(e) => setParcelID(e.target.value)}
                       id="parcel-search-input"
@@ -261,38 +258,6 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* PRESETS */}
-                <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
-                  <span className="text-slate-400 font-semibold uppercase tracking-wider text-[10px]">Esempi di Test rapidi:</span>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickPreset("BRT-OK-CONSEGNATO")}
-                    className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-md font-medium text-[11px] transition"
-                  >
-                    BRT-OK-CONSEGNATO (Consegnato)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickPreset("BRT-IN-TRANSIT")}
-                    className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-md font-medium text-[11px] transition"
-                  >
-                    BRT-IN-TRANSIT (In Viaggio)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickPreset("BRT-GIACENZA")}
-                    className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-md font-medium text-[11px] transition"
-                  >
-                    BRT-GIACENZA (Giacenza aperta)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleQuickPreset("BRT-ERROR")}
-                    className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 rounded-md font-medium text-[11px] transition"
-                  >
-                    BRT-ERROR (Shipment Non Trovata)
-                  </button>
-                </div>
               </form>
             </div>
 
