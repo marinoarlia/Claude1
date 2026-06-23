@@ -23,7 +23,6 @@ $clean = $parcelID;
 $isNumeric = (bool)preg_match('/^\d{7,15}$/', $clean);
 $looksReal = $isNumeric;
 
-// Include CSV lookup (silenzioso: non blocca in caso di errore)
 require_once __DIR__ . '/csv-lookup.php';
 
 // 1. BRT REST API
