@@ -124,4 +124,8 @@ export interface BrtTrackingResult {
   nota_info?: string;
 
   originalPayload?: any; // For full inspections
+
+  // CSV SFTP enrichment fields
+  numero_ordine?: string;
+  fonte_dati?: 'csv+api' | 'api' | 'mock';
 }

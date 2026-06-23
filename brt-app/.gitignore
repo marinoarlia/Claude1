@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# BRT CSV cache
+dist/cache/*.json

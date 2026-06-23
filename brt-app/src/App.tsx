@@ -421,6 +421,29 @@ export default function App() {
 
                 {/* THE EXQUISITE FIVE-COLUMN INFRASTRUCTURE CARD */}
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                  {/* Fonte dati badge */}
+                  {result.fonte_dati && (
+                    <div className="px-4 pt-3 pb-0 flex items-center gap-2">
+                      {result.fonte_dati === 'csv+api' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase tracking-wider">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 inline-block"></span>
+                          CSV + API
+                        </span>
+                      )}
+                      {result.fonte_dati === 'api' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200 uppercase tracking-wider">
+                          <span className="h-1.5 w-1.5 rounded-full bg-blue-500 inline-block"></span>
+                          API BRT
+                        </span>
+                      )}
+                      {result.fonte_dati === 'mock' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200 uppercase tracking-wider">
+                          <span className="h-1.5 w-1.5 rounded-full bg-slate-400 inline-block"></span>
+                          Demo
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 md:grid-cols-5 bg-slate-100/80 border-b border-slate-200 text-[10px] font-extrabold text-slate-700 tracking-wider uppercase divide-y md:divide-y-0 md:divide-x divide-slate-200">
                     <div className="p-3">Destinatario</div>
                     <div className="p-3">Mittente</div>
@@ -474,6 +497,12 @@ export default function App() {
                       <div className="text-slate-400 text-[11px] font-bold">
                         {result.riferimento_mittente_numerico || "-"}
                       </div>
+                      {result.numero_ordine && (
+                        <div className="mt-1 pt-1 border-t border-slate-100">
+                          <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">N° Ordine</div>
+                          <div className="text-slate-700 select-all">{result.numero_ordine}</div>
+                        </div>
+                      )}
                       {result.referente_consegna && (
                         <div className="mt-1 pt-1 border-t border-slate-100">
                           <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wide">Referente</div>
