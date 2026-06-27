@@ -148,15 +148,15 @@ class CdiscountSync extends Module
             exit;
         }
 
-        $tab = (string) Tools::getValue('cds_tab', 'config');
+        $this->currentTab = (string) Tools::getValue('cds_tab', 'config');
         $output = '';
 
         // Handle POST actions per tab
-        $output .= $this->handlePost($tab);
+        $output .= $this->handlePost($this->currentTab);
 
         return $output
-            . $this->renderTabs($tab)
-            . $this->renderTab($tab);
+            . $this->renderTabs($this->currentTab)
+            . $this->renderTab($this->currentTab);
     }
 
     private function handlePost($tab)
@@ -209,9 +209,22 @@ class CdiscountSync extends Module
     // TABS NAVIGATION
     // =========================================================================
 
+    /**
+     * Costruisce l'URL admin corretto con token CSRF di PrestaShop.
+     * Usa sempre questo metodo al posto di $_SERVER['REQUEST_URI'].
+     */
+    private function adminUrl(array $extra = [])
+    {
+        $params = array_merge([
+            'controller' => 'AdminModules',
+            'configure'  => $this->name,
+            'token'      => Tools::getAdminTokenLite('AdminModules'),
+        ], $extra);
+        return 'index.php?' . http_build_query($params);
+    }
+
     private function renderTabs($active)
     {
-        $uri = htmlspecialchars((string) $_SERVER['REQUEST_URI'], ENT_QUOTES, 'UTF-8');
         $tabs = [
             'config'      => '1. Configurazione',
             'categories'  => '2. Categorie',
@@ -222,10 +235,9 @@ class CdiscountSync extends Module
         ];
         $html = '<ul class="nav nav-tabs" style="margin-bottom:20px;">';
         foreach ($tabs as $key => $label) {
-            $cls   = $active === $key ? 'active' : '';
-            $href  = $uri . (strpos($uri, '?') !== false ? '&' : '?') . 'cds_tab=' . $key;
-            $href  = preg_replace('/([?&])cds_tab=[^&]*/', '$1cds_tab=' . $key, $href);
-            $html .= '<li class="' . $cls . '"><a href="' . htmlspecialchars($href, ENT_QUOTES, 'UTF-8') . '">' . $label . '</a></li>';
+            $cls  = $active === $key ? 'active' : '';
+            $href = htmlspecialchars($this->adminUrl(['cds_tab' => $key]), ENT_QUOTES, 'UTF-8');
+            $html .= '<li class="' . $cls . '"><a href="' . $href . '">' . $label . '</a></li>';
         }
         $html .= '</ul>';
         return $html;
@@ -249,7 +261,7 @@ class CdiscountSync extends Module
 
     private function renderTabConfig()
     {
-        $action     = htmlspecialchars((string) $_SERVER['REQUEST_URI'], ENT_QUOTES, 'UTF-8');
+        $action = htmlspecialchars($this->adminUrl(['cds_tab' => $this->currentTab]), ENT_QUOTES, 'UTF-8');
         $clientId   = htmlspecialchars((string) Configuration::get('CDS_CLIENT_ID'),      ENT_QUOTES, 'UTF-8');
         $clientSec  = htmlspecialchars((string) Configuration::get('CDS_CLIENT_SECRET'),   ENT_QUOTES, 'UTF-8');
         $sellerId   = htmlspecialchars((string) Configuration::get('CDS_SELLER_ID'),       ENT_QUOTES, 'UTF-8');
@@ -346,7 +358,7 @@ HTML;
 
     private function renderTabCategories()
     {
-        $action    = htmlspecialchars((string) $_SERVER['REQUEST_URI'], ENT_QUOTES, 'UTF-8');
+        $action = htmlspecialchars($this->adminUrl(['cds_tab' => $this->currentTab]), ENT_QUOTES, 'UTF-8');
         $count     = (int) Db::getInstance()->getValue('SELECT COUNT(*) FROM `' . _DB_PREFIX_ . 'cds_category`');
         $lastSync  = Configuration::get('CDS_CATEGORY_LAST_SYNC') ?: 'mai';
 
@@ -408,7 +420,7 @@ HTML;
 
     private function renderTabProducts()
     {
-        $action = htmlspecialchars((string) $_SERVER['REQUEST_URI'], ENT_QUOTES, 'UTF-8');
+        $action = htmlspecialchars($this->adminUrl(['cds_tab' => $this->currentTab]), ENT_QUOTES, 'UTF-8');
         $page   = max(1, (int) Tools::getValue('p', 1));
         $limit  = 100;
         $offset = ($page - 1) * $limit;
@@ -453,9 +465,7 @@ HTML;
         // Pagination
         $paginHtml = '';
         for ($i = 1; $i <= $pages; $i++) {
-            $href   = preg_replace('/[?&]p=\d+/', '', (string) $_SERVER['REQUEST_URI']);
-            $sep    = strpos($href, '?') !== false ? '&' : '?';
-            $href   = htmlspecialchars($href . $sep . 'p=' . $i . '&cds_tab=products', ENT_QUOTES, 'UTF-8');
+            $href   = htmlspecialchars($this->adminUrl(['cds_tab' => 'products', 'p' => $i]), ENT_QUOTES, 'UTF-8');
             $active = $i === $page ? 'class="active"' : '';
             $paginHtml .= "<li {$active}><a href='{$href}'>{$i}</a></li>";
         }
@@ -503,12 +513,11 @@ HTML;
 
     private function renderTabTranslation()
     {
-        $action   = htmlspecialchars((string) $_SERVER['REQUEST_URI'], ENT_QUOTES, 'UTF-8');
         $endpoint = htmlspecialchars((string)(Configuration::get('CDS_AI_ENDPOINT') ?: 'https://ollama.masterbrico.com'), ENT_QUOTES, 'UTF-8');
         $model    = htmlspecialchars((string)(Configuration::get('CDS_AI_MODEL') ?: 'qwen2.5:7b'), ENT_QUOTES, 'UTF-8');
         $stats    = $this->translationStats();
-        $ajaxUrl  = json_encode((string) $_SERVER['REQUEST_URI'], JSON_UNESCAPED_SLASHES);
-        $token    = json_encode((string) Tools::getValue('token'));
+        $ajaxUrl  = json_encode($this->adminUrl(['cds_tab' => 'translation']), JSON_UNESCAPED_SLASHES);
+        $token    = json_encode(Tools::getAdminTokenLite('AdminModules'));
 
         return <<<HTML
 <div class="panel">
@@ -620,8 +629,8 @@ HTML;
 
     private function renderTabSync()
     {
-        $ajaxUrl = json_encode((string) $_SERVER['REQUEST_URI'], JSON_UNESCAPED_SLASHES);
-        $token   = json_encode((string) Tools::getValue('token'));
+        $ajaxUrl = json_encode($this->adminUrl(['cds_tab' => 'sync']), JSON_UNESCAPED_SLASHES);
+        $token   = json_encode(Tools::getAdminTokenLite('AdminModules'));
         $p       = _DB_PREFIX_;
         $enabled = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1");
         $synced  = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND cds_status='synced'");
@@ -771,8 +780,8 @@ HTML;
 
     private function renderTabOrders()
     {
-        $ajaxUrl  = json_encode((string) $_SERVER['REQUEST_URI'], JSON_UNESCAPED_SLASHES);
-        $token    = json_encode((string) Tools::getValue('token'));
+        $ajaxUrl = json_encode($this->adminUrl(['cds_tab' => 'orders']), JSON_UNESCAPED_SLASHES);
+        $token    = json_encode(Tools::getAdminTokenLite('AdminModules'));
         $imported = (int) Db::getInstance()->getValue('SELECT COUNT(*) FROM `' . _DB_PREFIX_ . 'cds_order`');
         $lastSync = Configuration::get('CDS_LAST_ORDER_SYNC') ?: 'mai';
 
