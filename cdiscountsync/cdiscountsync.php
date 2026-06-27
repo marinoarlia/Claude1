@@ -1797,7 +1797,7 @@ HTML;
         $sql = "SELECT
                 p.id_product,
                 COALESCE(pa.id_product_attribute, 0) AS id_product_attribute,
-                COALESCE(pl.name,'Prodotto #'.p.id_product) AS name,
+                COALESCE(pl.name,CONCAT('Prodotto #',p.id_product)) AS name,
                 COALESCE(comb.combo,'') AS combo,
                 COALESCE(cl.name,'') AS category_name,
                 p.reference AS sku_product, pa.reference AS sku_attr,
@@ -1922,7 +1922,7 @@ HTML;
 
         $rows = Db::getInstance()->executeS(
             "SELECT DISTINCT p.id_category_default AS id_category,
-                COALESCE(cl.name,'Categoria #'.p.id_category_default) AS ps_name,
+                COALESCE(cl.name,CONCAT('Categoria #',p.id_category_default)) AS ps_name,
                 COALESCE(cm.cds_reference,'') AS cds_reference,
                 COALESCE(cm.cds_label,'') AS cds_label
              FROM `{$p}cds_product` cp
