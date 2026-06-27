@@ -5,7 +5,7 @@ if (!defined('_PS_VERSION_')) {
 
 class CdiscountSync extends Module
 {
-    const VERSION = '3.0.0';
+    const VERSION = '3.1.0';
 
     public function __construct()
     {
@@ -60,6 +60,7 @@ class CdiscountSync extends Module
             `id_product` INT UNSIGNED NOT NULL,
             `id_product_attribute` INT UNSIGNED NOT NULL DEFAULT 0,
             `enabled` TINYINT(1) NOT NULL DEFAULT 0,
+            `catalog_status` VARCHAR(32) NOT NULL DEFAULT 'none',
             `cds_status` VARCHAR(32) NOT NULL DEFAULT 'none',
             `last_price` DECIMAL(20,6) DEFAULT NULL,
             `last_stock` INT DEFAULT NULL,
@@ -621,27 +622,27 @@ HTML;
     {
         $ajaxUrl = json_encode((string) $_SERVER['REQUEST_URI'], JSON_UNESCAPED_SLASHES);
         $token   = json_encode((string) Tools::getValue('token'));
-        $enabled = (int) Db::getInstance()->getValue(
-            'SELECT COUNT(*) FROM `' . _DB_PREFIX_ . 'cds_product` WHERE enabled=1'
-        );
-        $synced  = (int) Db::getInstance()->getValue(
-            'SELECT COUNT(*) FROM `' . _DB_PREFIX_ . 'cds_product` WHERE enabled=1 AND cds_status="synced"'
-        );
-        $errors  = (int) Db::getInstance()->getValue(
-            'SELECT COUNT(*) FROM `' . _DB_PREFIX_ . 'cds_product` WHERE enabled=1 AND cds_status="error"'
-        );
+        $p       = _DB_PREFIX_;
+        $enabled = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1");
+        $synced  = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND cds_status='synced'");
+        $errors  = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND cds_status='error'");
+        $created = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND catalog_status IN ('created','exists')");
 
         return <<<HTML
 <div class="panel">
-    <h3>Sincronizzazione offerte su Cdiscount</h3>
+    <h3>Sincronizzazione prodotti su Cdiscount</h3>
     <p>
         Prodotti abilitati: <strong>{$enabled}</strong> &nbsp;|&nbsp;
-        Sincronizzati OK: <strong id="s-synced">{$synced}</strong> &nbsp;|&nbsp;
+        Catalogo CDS creato: <strong id="s-created">{$created}</strong> &nbsp;|&nbsp;
+        Offerte sincronizzate: <strong id="s-synced">{$synced}</strong> &nbsp;|&nbsp;
         Errori: <strong id="s-errors">{$errors}</strong>
     </p>
     <p class="alert alert-info">
-        <strong>Come funziona:</strong> il modulo aggiorna <em>prezzi e stock</em> dei prodotti già presenti su Cdiscount
-        tramite Octopia REST API (PUT offerta). Ogni prodotto viene inviato uno alla volta via AJAX per evitare timeout.
+        <strong>Come funziona — 2 passi per ogni prodotto:</strong><br>
+        <strong>1.</strong> <code>POST /products</code> → crea il prodotto nel catalogo Cdiscount (titolo FR, descrizione FR, immagini, marca, categoria)<br>
+        <strong>2.</strong> <code>PUT /offers</code> → imposta prezzo e stock<br>
+        Se il prodotto esiste già nel catalogo CDS, il passo 1 viene saltato automaticamente e si aggiorna solo l'offerta.
+        La traduzione FR deve essere completata prima di sincronizzare.
     </p>
 
     <div class="progress" style="margin:10px 0;">
@@ -695,8 +696,9 @@ HTML;
     function loop(){
         if(!running) return;
         ajax('sync_next').then(function(d){
-            setText('s-synced', d.synced||0);
-            setText('s-errors', d.errors||0);
+            setText('s-created', d.created||0);
+            setText('s-synced',  d.synced||0);
+            setText('s-errors',  d.errors||0);
             setBar(parseInt(d.synced||0)+parseInt(d.errors||0), parseInt(d.total||0));
             msg.textContent = d.message || '...';
             if(d.done){
@@ -734,24 +736,31 @@ HTML;
 
     private function renderSyncErrors()
     {
+        $p    = _DB_PREFIX_;
         $rows = Db::getInstance()->executeS(
-            'SELECT p.id_product, p.id_product_attribute, cp.last_error, cp.last_sync
-             FROM `' . _DB_PREFIX_ . 'cds_product` cp
-             INNER JOIN `' . _DB_PREFIX_ . 'product` p ON p.id_product = cp.id_product
-             WHERE cp.cds_status = "error" AND cp.enabled = 1
-             ORDER BY cp.last_sync DESC LIMIT 30'
+            "SELECT cp.id_product, cp.id_product_attribute, cp.catalog_status,
+                    cp.cds_status, cp.last_error, cp.last_sync
+             FROM `{$p}cds_product` cp
+             WHERE cp.cds_status='error' AND cp.enabled=1
+             ORDER BY cp.last_sync DESC LIMIT 30"
         );
         if (!$rows) {
             return '<p>Nessun errore.</p>';
         }
         $html = '<table class="table table-condensed table-bordered"><thead><tr>
-            <th>ID PS</th><th>Variante</th><th>Errore</th><th>Data</th>
+            <th>ID PS</th><th>Variante</th><th>Catalogo</th><th>Offerta</th><th>Errore</th><th>Data</th>
         </tr></thead><tbody>';
         foreach ($rows as $r) {
-            $err  = htmlspecialchars((string) $r['last_error'], ENT_QUOTES, 'UTF-8');
-            $date = htmlspecialchars((string) $r['last_sync'],  ENT_QUOTES, 'UTF-8');
-            $html .= "<tr><td>{$r['id_product']}</td><td>{$r['id_product_attribute']}</td>
-                <td>{$err}</td><td>{$date}</td></tr>";
+            $err   = htmlspecialchars((string)$r['last_error'],    ENT_QUOTES, 'UTF-8');
+            $date  = htmlspecialchars((string)$r['last_sync'],     ENT_QUOTES, 'UTF-8');
+            $cat   = htmlspecialchars((string)$r['catalog_status'],ENT_QUOTES, 'UTF-8');
+            $offer = htmlspecialchars((string)$r['cds_status'],    ENT_QUOTES, 'UTF-8');
+            $html .= "<tr>
+                <td>{$r['id_product']}</td>
+                <td>{$r['id_product_attribute']}</td>
+                <td>{$cat}</td><td>{$offer}</td>
+                <td>{$err}</td><td>{$date}</td>
+            </tr>";
         }
         return $html . '</tbody></table>';
     }
@@ -1018,23 +1027,19 @@ HTML;
 
     private function ajaxSyncNext()
     {
-        $p   = _DB_PREFIX_;
-        $total = (int) Db::getInstance()->getValue(
-            "SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1"
-        );
-        $synced = (int) Db::getInstance()->getValue(
-            "SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND cds_status='synced'"
-        );
-        $errors = (int) Db::getInstance()->getValue(
-            "SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND cds_status='error'"
-        );
+        $p = _DB_PREFIX_;
 
-        // Find next product to sync (pending or none)
+        $total   = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1");
+        $synced  = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND cds_status='synced'");
+        $errors  = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND cds_status='error'");
+        $created = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND catalog_status IN ('created','exists')");
+
+        // Find next product to sync
         $row = Db::getInstance()->getRow(
-            "SELECT cp.id_product, cp.id_product_attribute
-             FROM `{$p}cds_product` cp
-             WHERE cp.enabled=1 AND cp.cds_status NOT IN ('synced','error')
-             ORDER BY cp.id_product ASC LIMIT 1"
+            "SELECT id_product, id_product_attribute
+             FROM `{$p}cds_product`
+             WHERE enabled=1 AND cds_status NOT IN ('synced','error')
+             ORDER BY id_product ASC LIMIT 1"
         );
 
         if (!$row) {
@@ -1043,6 +1048,7 @@ HTML;
                 'total'   => $total,
                 'synced'  => $synced,
                 'errors'  => $errors,
+                'created' => $created,
                 'message' => 'Tutti i prodotti sincronizzati.',
             ];
         }
@@ -1061,30 +1067,35 @@ HTML;
              cds_status='" . pSQL($status) . "',
              last_error='" . pSQL($errMsg) . "',
              last_sync=NOW()" .
-            ($price !== null ? ", last_price=" . (float) $price : '') .
-            ($stock !== null ? ", last_stock=" . (int) $stock : '') .
+            ($price !== null ? ", last_price=" . (float)$price : '') .
+            ($stock !== null ? ", last_stock=" . (int)$stock : '') .
             " WHERE id_product={$idProduct} AND id_product_attribute={$idAttr}"
         );
 
         if ($result['success']) { $synced++; } else { $errors++; }
+        $created = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds_product` WHERE enabled=1 AND catalog_status IN ('created','exists')");
 
+        $label = $idAttr ? "ID {$idProduct}/var.{$idAttr}" : "ID {$idProduct}";
         return [
             'done'    => false,
             'total'   => $total,
             'synced'  => $synced,
             'errors'  => $errors,
+            'created' => $created,
             'message' => $result['success']
-                ? 'Sincronizzato: ID ' . $idProduct . ($idAttr ? '/' . $idAttr : '')
-                : 'Errore ID ' . $idProduct . ': ' . $result['message'],
+                ? "Creato + sincronizzato: {$label}"
+                : "Errore {$label}: " . $result['message'],
         ];
     }
 
     private function ajaxSyncReset()
     {
         Db::getInstance()->execute(
-            'UPDATE `' . _DB_PREFIX_ . 'cds_product` SET cds_status="none", last_error=NULL WHERE enabled=1'
+            "UPDATE `" . _DB_PREFIX_ . "cds_product`
+             SET cds_status='none', catalog_status='none', last_error=NULL
+             WHERE enabled=1"
         );
-        return ['success' => true, 'message' => 'Reset completato. Tutti i prodotti verranno ri-sincronizzati.'];
+        return ['success' => true, 'message' => 'Reset completato. Tutti i prodotti verranno ricreati e ri-sincronizzati.'];
     }
 
     // =========================================================================
@@ -1099,9 +1110,14 @@ HTML;
     }
 
     // =========================================================================
-    // OCTOPIA – OFFERS
+    // OCTOPIA – CATALOG PRODUCT CREATION + OFFER SYNC
     // =========================================================================
 
+    /**
+     * Full sync for one product/variant:
+     * 1. POST /products  → crea o aggiorna il prodotto nel catalogo CDS
+     * 2. PUT  /offers    → aggiorna prezzo + stock
+     */
     private function syncOffer($idProduct, $idAttr)
     {
         $idLang = (int) $this->context->language->id;
@@ -1123,37 +1139,170 @@ HTML;
         if (!$sku) {
             return ['success' => false, 'message' => 'SKU mancante.'];
         }
+        if (!$ean) {
+            return ['success' => false, 'message' => 'EAN13 mancante.'];
+        }
 
         $token = $this->getOctopiaToken();
         if (!$token) {
             return ['success' => false, 'message' => 'Token Octopia non ottenuto. Controlla credenziali API.'];
         }
 
-        // Build shipping info from tiers
-        $shippingInfo = $this->buildShippingPayload();
+        // ---- Step 1: crea prodotto nel catalogo ----
+        $catalogResult = $this->createCatalogProduct($pRow, $idProduct, $idAttr, $sku, $ean, $token, $idLang, $idShop);
+        if (!$catalogResult['success']) {
+            // Salva catalog_status=error ma continua con l'offerta solo se il prodotto esiste già
+            if ($catalogResult['already_exists'] ?? false) {
+                $this->updateCatalogStatus($idProduct, $idAttr, 'exists');
+            } else {
+                $this->updateCatalogStatus($idProduct, $idAttr, 'error');
+                return ['success' => false, 'message' => 'Errore catalogo: ' . $catalogResult['message'], 'price' => $cdsPrice, 'stock' => $stock];
+            }
+        } else {
+            $this->updateCatalogStatus($idProduct, $idAttr, 'created');
+        }
 
-        $payload = [[
+        // ---- Step 2: aggiorna offerta (prezzo + stock) ----
+        $offerPayload = [[
             'sellerProductId'     => $sku,
             'productEan'          => $ean,
             'price'               => round($cdsPrice, 2),
-            'shippingInformation' => $shippingInfo,
+            'shippingInformation' => $this->buildShippingPayload(),
             'stock'               => $stock,
             'state'               => 'NEW',
             'comment'             => '',
         ]];
 
-        $response = $this->octopiaRequest(
+        $offerResp = $this->octopiaRequest(
             'PUT',
             'https://api.octopia-io.net/seller/v2/offers',
             $token,
-            json_encode($payload, JSON_UNESCAPED_UNICODE)
+            json_encode($offerPayload, JSON_UNESCAPED_UNICODE)
         );
 
-        if (!$response['success']) {
-            return ['success' => false, 'message' => $response['message'], 'price' => $cdsPrice, 'stock' => $stock];
+        if (!$offerResp['success']) {
+            return ['success' => false, 'message' => 'Errore offerta: ' . $offerResp['message'], 'price' => $cdsPrice, 'stock' => $stock];
         }
 
         return ['success' => true, 'message' => '', 'price' => $cdsPrice, 'stock' => $stock];
+    }
+
+    /**
+     * Crea o aggiorna il prodotto nel catalogo Cdiscount via POST /products.
+     * Richiede traduzione FR già disponibile.
+     */
+    private function createCatalogProduct(array $pRow, $idProduct, $idAttr, $sku, $ean, $token, $idLang, $idShop)
+    {
+        $p = _DB_PREFIX_;
+
+        // Recupera traduzione FR
+        $trans = Db::getInstance()->getRow(
+            "SELECT title_fr, desc_short_fr, desc_fr FROM `{$p}cds_translation`
+             WHERE id_product=" . (int)$idProduct . " AND id_product_attribute=" . (int)$idAttr . "
+             AND status='done'"
+        );
+        if (!$trans || empty($trans['title_fr'])) {
+            return ['success' => false, 'message' => 'Traduzione FR mancante. Esegui prima la traduzione nel tab Traduzioni.'];
+        }
+
+        // Recupera categoria CDS mappata
+        $catRow = Db::getInstance()->getRow(
+            "SELECT cm.cds_reference FROM `{$p}cds_category_map` cm
+             INNER JOIN `{$p}product` p ON p.id_category_default = cm.id_category
+             WHERE p.id_product=" . (int)$idProduct
+        );
+        $cdsCategory = $catRow ? trim((string)$catRow['cds_reference']) : '';
+        if (!$cdsCategory) {
+            return ['success' => false, 'message' => 'Categoria Cdiscount non mappata. Vai nel tab Categorie.'];
+        }
+
+        $brand       = trim((string)$pRow['manufacturer_name']);
+        $titleFr     = Tools::substr(trim((string)$trans['title_fr']), 0, 500);
+        $descShortFr = trim((string)$trans['desc_short_fr']);
+        $descFr      = trim((string)$trans['desc_fr']);
+        $weight      = max(0, (float)$pRow['product_weight'] + (float)$pRow['attribute_weight']);
+
+        // Immagini
+        $images = $this->getProductImageUrls((int)$idProduct);
+
+        $product = [
+            'sellerProductId'     => $sku,
+            'ean'                 => $ean,
+            'title'               => $titleFr,
+            'longLabel'           => $descFr ?: $titleFr,
+            'description'         => $descShortFr ?: $titleFr,
+            'brandReference'      => $brand ?: 'Sans marque',
+            'categoryReference'   => $cdsCategory,
+            'weight'              => round($weight, 3),
+            'mainImageUrl'        => isset($images[0]) ? $images[0] : '',
+            'additionalImageUrls' => array_slice($images, 1, 9),
+            'navigation'          => [
+                ['name' => 'MARQUE', 'value' => $brand ?: 'Sans marque'],
+            ],
+        ];
+
+        // Aggiungi variante se presente (colore/taglia/ecc.)
+        $combo = trim((string)$pRow['combo']);
+        if ($combo) {
+            $product['sellerProductFamily'] = trim((string)($pRow['sku_product'] ?: $sku));
+            $product['modelReference']      = $sku;
+            // Prova a estrarre attributi (es. "Colore: Rosso, Taglia: L")
+            $attrs = [];
+            foreach (explode(', ', $combo) as $pair) {
+                $parts = explode(': ', $pair, 2);
+                if (count($parts) === 2) {
+                    $attrs[] = ['name' => trim($parts[0]), 'value' => trim($parts[1])];
+                }
+            }
+            if ($attrs) {
+                $product['navigation'] = array_merge($product['navigation'], $attrs);
+            }
+        }
+
+        $payload  = [$product];
+        $response = $this->octopiaRequest(
+            'POST',
+            'https://api.octopia-io.net/seller/v2/products',
+            $token,
+            json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+        );
+
+        if (!$response['success']) {
+            // HTTP 409 = prodotto già esiste → non è un errore bloccante
+            if ($response['http_code'] === 409 || strpos($response['message'], '409') !== false) {
+                return ['success' => false, 'message' => $response['message'], 'already_exists' => true];
+            }
+            return ['success' => false, 'message' => $response['message'], 'already_exists' => false];
+        }
+
+        return ['success' => true, 'message' => ''];
+    }
+
+    private function updateCatalogStatus($idProduct, $idAttr, $status)
+    {
+        Db::getInstance()->execute(
+            "UPDATE `" . _DB_PREFIX_ . "cds_product` SET catalog_status='" . pSQL($status) . "'
+             WHERE id_product=" . (int)$idProduct . " AND id_product_attribute=" . (int)$idAttr
+        );
+    }
+
+    /**
+     * Restituisce array di URL assoluti delle immagini del prodotto.
+     */
+    private function getProductImageUrls($idProduct)
+    {
+        $images = Image::getImages((int)$this->context->language->id, (int)$idProduct);
+        if (!is_array($images)) { return []; }
+        $urls = [];
+        foreach ($images as $img) {
+            $imageObj = new Image((int)$img['id_image']);
+            $path     = _PS_IMG_DIR_ . 'p/' . $imageObj->getImgPath() . '.jpg';
+            if (!file_exists($path)) { continue; }
+            $url = Tools::getShopDomainSsl(true)
+                . '/img/p/' . $imageObj->getImgPath() . '.jpg';
+            $urls[] = $url;
+        }
+        return $urls;
     }
 
     private function buildShippingPayload()
