@@ -363,31 +363,11 @@ class Cdsync extends Module
         if (!$key) {
             return ['success' => false, 'message' => 'Chiave API Gemini non inserita.'];
         }
-        $url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' . urlencode($key);
-        $payload = ['contents' => [['parts' => [['text' => 'Rispondi solo "OK"']]]]];
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_POST           => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 20,
-            CURLOPT_POSTFIELDS     => json_encode($payload),
-            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-        ]);
-        $body = curl_exec($ch);
-        $err  = curl_error($ch);
-        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($err) { return ['success' => false, 'message' => 'Errore cURL: ' . $err]; }
-        if ($code >= 400) { return ['success' => false, 'message' => "HTTP {$code}: " . substr($body, 0, 300)]; }
-
-        $data     = json_decode($body, true);
-        $response = trim((string)($data['candidates'][0]['content']['parts'][0]['text'] ?? ''));
-        if ($response === '') {
-            return ['success' => false, 'message' => 'Risposta vuota. Corpo: ' . substr($body, 0, 300)];
+        $result = $this->geminiRequest($key, 'Rispondi solo "OK"', 10);
+        if ($result === null) {
+            return ['success' => false, 'message' => $this->lastTranslateError ?: 'Errore sconosciuto'];
         }
-        return ['success' => true, 'message' => 'Connessione OK. Risposta: ' . $response];
+        return ['success' => true, 'message' => 'Connessione OK. Risposta: ' . $result];
     }
 
     private function ajaxTranslateOne()
@@ -1673,33 +1653,43 @@ HTML;
     {
         $key = (string)Configuration::get('CDS2_GEMINI_KEY');
         if (!$key) { $this->lastTranslateError = 'Chiave API Gemini non configurata.'; return null; }
+        $prompt = "Traduci in francese questo testo di prodotto. Rispondi SOLO con la traduzione:\n\n" . $text;
+        return $this->geminiRequest($key, $prompt, 120);
+    }
 
-        $url     = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' . urlencode($key);
-        $payload = ['contents' => [['parts' => [['text' =>
-            "Traduci in francese questo testo di prodotto. Rispondi SOLO con la traduzione:\n\n" . $text
-        ]]]]];
+    private function geminiRequest($key, $prompt, $timeout = 30)
+    {
+        // Try models in order until one works
+        $models = ['gemini-2.0-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
+        $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
 
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_POST           => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 30,
-            CURLOPT_POSTFIELDS     => json_encode($payload),
-            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-        ]);
-        $body = curl_exec($ch);
-        $err  = curl_error($ch);
-        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        foreach ($models as $model) {
+            $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . $model . ':generateContent?key=' . urlencode($key);
+            $ch  = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => $timeout,
+                CURLOPT_POSTFIELDS     => json_encode($payload),
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            ]);
+            $body = curl_exec($ch);
+            $err  = curl_error($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
 
-        if ($err) { $this->lastTranslateError = 'Gemini cURL: ' . $err; return null; }
-        if ($code >= 400) { $this->lastTranslateError = "Gemini HTTP {$code}: " . substr($body, 0, 200); return null; }
+            if ($err) { $this->lastTranslateError = 'Gemini cURL: ' . $err; return null; }
+            if ($code === 404) { continue; } // try next model
+            if ($code >= 400) { $this->lastTranslateError = "Gemini HTTP {$code}: " . substr($body, 0, 300); return null; }
 
-        $data   = json_decode($body, true);
-        $result = trim((string)($data['candidates'][0]['content']['parts'][0]['text'] ?? ''));
-        if ($result === '') { $this->lastTranslateError = 'Gemini risposta vuota. Body: ' . substr($body, 0, 200); return null; }
-        $this->lastTranslateError = null;
-        return $result;
+            $data   = json_decode($body, true);
+            $result = trim((string)($data['candidates'][0]['content']['parts'][0]['text'] ?? ''));
+            if ($result === '') { $this->lastTranslateError = 'Gemini risposta vuota. Body: ' . substr($body, 0, 200); return null; }
+            $this->lastTranslateError = null;
+            return $result;
+        }
+        $this->lastTranslateError = 'Nessun modello Gemini disponibile per questa chiave API.';
+        return null;
     }
 
     // =========================================================================
