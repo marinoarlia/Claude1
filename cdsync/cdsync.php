@@ -1040,7 +1040,10 @@ HTML;
             </tr>";
         }
 
-        $ajaxUrl = json_encode($this->adminUrl(['cds_ajax' => 'translate_one']));
+        $ajaxUrl   = json_encode($this->adminUrl(['cds_ajax' => 'translate_one']));
+        // Gemini free tier: max 15 req/min → 1 ogni 4s. Ollama: nessun limite.
+        $trDelay   = ($provider === 'gemini') ? 4200 : 0;
+        $trDelayJs = json_encode($trDelay);
 
         return <<<HTML
 <div class="panel">
@@ -1072,8 +1075,9 @@ HTML;
     </div>
 </div>
 <script>
-var _trStop = false;
-var _trAjax = {$ajaxUrl};
+var _trStop  = false;
+var _trAjax  = {$ajaxUrl};
+var _trDelay = {$trDelayJs}; // ms between requests (4200 for Gemini free tier)
 
 function toggleAllTr(v){ document.querySelectorAll('.tr-check').forEach(function(c){ c.checked=v; }); }
 function selectUntranslated(){
@@ -1086,6 +1090,11 @@ function selectUntranslated(){
 function startTranslation(){
     var checks = Array.from(document.querySelectorAll('.tr-check:checked'));
     if(!checks.length){ alert('Nessun prodotto selezionato.'); return; }
+    if(_trDelay > 0){
+        var mins = Math.ceil(checks.length * _trDelay / 60000);
+        var msg = 'Gemini free tier: 15 req/min.\nVerranno aggiunti ' + (_trDelay/1000).toFixed(1) + 's tra ogni prodotto.\nTempo stimato: ~' + mins + ' minuti per ' + checks.length + ' prodotti.\n\nContinuare?';
+        if(!confirm(msg)) return;
+    }
     _trStop = false;
     document.getElementById('btn-tr-start').disabled = true;
     document.getElementById('btn-tr-stop').style.display = '';
@@ -1118,12 +1127,20 @@ function translateNext(checks, idx, total){
                 document.getElementById('tr-status-'+key).innerHTML =
                     '<span class="label label-danger">✗ errore</span><br><small class="text-danger">'+err+'</small>';
             }
-            translateNext(checks, idx+1, total);
+            if(_trDelay > 0){
+                setTimeout(function(){ translateNext(checks, idx+1, total); }, _trDelay);
+            } else {
+                translateNext(checks, idx+1, total);
+            }
         })
         .catch(function(e){
             document.getElementById('tr-status-'+key).innerHTML =
                 '<span class="label label-danger">✗ errore rete</span><br><small class="text-danger">'+e.message+'</small>';
-            translateNext(checks, idx+1, total);
+            if(_trDelay > 0){
+                setTimeout(function(){ translateNext(checks, idx+1, total); }, _trDelay);
+            } else {
+                translateNext(checks, idx+1, total);
+            }
         });
 }
 </script>
@@ -1751,6 +1768,19 @@ HTML;
 
             if ($err) { $this->lastTranslateError = 'Gemini cURL: ' . $err; return null; }
             if ($code === 404) { continue; } // try next model
+            if ($code === 429) {
+                // rate limit: wait and retry once
+                sleep(5);
+                $ch2 = curl_init($url);
+                curl_setopt_array($ch2, [
+                    CURLOPT_POST => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => $timeout,
+                    CURLOPT_POSTFIELDS => json_encode($payload), CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+                ]);
+                $body = curl_exec($ch2); $err = curl_error($ch2); $code = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+                curl_close($ch2);
+                if ($err) { $this->lastTranslateError = 'Gemini cURL retry: ' . $err; return null; }
+                if ($code === 429) { $this->lastTranslateError = 'Gemini quota esaurita (429). Attendi qualche minuto.'; return null; }
+            }
             if ($code >= 400) { $this->lastTranslateError = "Gemini HTTP {$code}: " . substr($body, 0, 300); return null; }
 
             $data   = json_decode($body, true);
