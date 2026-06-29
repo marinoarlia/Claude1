@@ -5,7 +5,10 @@ if (!defined('_PS_VERSION_')) {
 
 class Cdsync extends Module
 {
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
+
+    const API_BASE  = 'https://api.octopia-io.net';
+    const TOKEN_URL = 'https://auth.octopia-io.net/auth/realms/maas/protocol/openid-connect/token';
 
     /** @var string */
     protected $currentTab = 'config';
@@ -37,7 +40,8 @@ class Cdsync extends Module
         foreach ([
             'CDS2_CLIENT_ID','CDS2_CLIENT_SECRET','CDS2_SELLER_ID',
             'CDS2_COMMISSION_RATE','CDS2_SHIPPING_TIERS',
-            'CDS2_AI_ENDPOINT','CDS2_AI_MODEL',
+            'CDS2_AI_PROVIDER','CDS2_AI_ENDPOINT','CDS2_AI_MODEL',
+            'CDS2_GEMINI_KEY',
             'CDS2_CRON_TOKEN','CDS2_LAST_ORDER_SYNC',
             'CDS2_CATEGORY_LAST_SYNC',
         ] as $k) {
@@ -94,12 +98,11 @@ class Cdsync extends Module
 
         $ok = $ok && $db->execute("CREATE TABLE IF NOT EXISTS `{$p}cds2_category` (
             `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
-            `reference` VARCHAR(16) NOT NULL,
+            `reference` VARCHAR(32) NOT NULL,
             `label` VARCHAR(255) NOT NULL DEFAULT '',
             `level` TINYINT UNSIGNED NOT NULL DEFAULT 0,
             `is_active` TINYINT(1) NOT NULL DEFAULT 1,
-            `parent_reference` VARCHAR(16) DEFAULT NULL,
-            `parent_references` VARCHAR(255) DEFAULT NULL,
+            `parent_reference` VARCHAR(32) DEFAULT NULL,
             `updated_at` DATETIME DEFAULT NULL,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uq_ref` (`reference`)
@@ -130,13 +133,15 @@ class Cdsync extends Module
         ]);
         $defaults = [
             'CDS2_COMMISSION_RATE' => '15',
-            'CDS2_AI_ENDPOINT'     => 'https://ollama.masterbrico.com',
-            'CDS2_AI_MODEL'        => 'qwen2.5:7b',
+            'CDS2_AI_PROVIDER'     => 'ollama',
+            'CDS2_AI_ENDPOINT'     => 'https://ollama.masterbrico.com/api/generate',
+            'CDS2_AI_MODEL'        => 'qwen2.5:1.5b',
+            'CDS2_GEMINI_KEY'      => '',
             'CDS2_CRON_TOKEN'      => substr(md5(uniqid('cds2', true)), 0, 24),
             'CDS2_SHIPPING_TIERS'  => $tiers,
         ];
         foreach ($defaults as $k => $v) {
-            if (!Configuration::get($k)) {
+            if (Configuration::get($k) === false) {
                 Configuration::updateValue($k, $v);
             }
         }
@@ -144,7 +149,7 @@ class Cdsync extends Module
     }
 
     // =========================================================================
-    // ADMIN URL HELPER  (evita errori token CSRF)
+    // ADMIN URL HELPER
     // =========================================================================
 
     private function adminUrl(array $extra = [])
@@ -182,39 +187,27 @@ class Cdsync extends Module
 
     private function handlePost()
     {
-        if (Tools::isSubmit('submitCds2Config')) {
-            return $this->postConfig();
-        }
-        if (Tools::isSubmit('submitCds2CategoryImport')) {
-            return $this->postCategoryImport();
-        }
-        if (Tools::isSubmit('submitCds2CategoryMap')) {
-            return $this->postCategoryMap();
-        }
-        if (Tools::isSubmit('submitCds2Products')) {
-            return $this->postProducts();
-        }
+        if (Tools::isSubmit('submitCds2Config'))         { return $this->postConfig(); }
+        if (Tools::isSubmit('submitCds2CategoryImport')) { return $this->postCategoryImport(); }
+        if (Tools::isSubmit('submitCds2CategoryMap'))    { return $this->postCategoryMap(); }
+        if (Tools::isSubmit('submitCds2Products'))       { return $this->postProducts(); }
         return '';
     }
 
     private function postConfig()
     {
-        $fields = [
-            'CDS2_CLIENT_ID','CDS2_CLIENT_SECRET','CDS2_SELLER_ID',
-            'CDS2_AI_ENDPOINT','CDS2_AI_MODEL',
-        ];
-        foreach ($fields as $f) {
+        foreach (['CDS2_CLIENT_ID','CDS2_CLIENT_SECRET','CDS2_SELLER_ID',
+                  'CDS2_AI_PROVIDER','CDS2_AI_ENDPOINT','CDS2_AI_MODEL','CDS2_GEMINI_KEY'] as $f) {
             Configuration::updateValue($f, pSQL(trim((string) Tools::getValue($f))));
         }
         $rate = (float) str_replace(',', '.', Tools::getValue('CDS2_COMMISSION_RATE'));
         Configuration::updateValue('CDS2_COMMISSION_RATE', $rate);
 
-        // shipping tiers
-        $tiers = [];
+        $tiers   = [];
         $weights = Tools::getValue('tier_weight', []);
         $prices  = Tools::getValue('tier_price',  []);
         foreach ($weights as $i => $w) {
-            $w = (float) str_replace(',', '.', $w);
+            $w     = (float) str_replace(',', '.', $w);
             $price = (float) str_replace(',', '.', $prices[$i] ?? 0);
             if ($w > 0 && $price > 0) {
                 $tiers[] = ['max_weight' => $w, 'price' => $price];
@@ -224,7 +217,6 @@ class Cdsync extends Module
             usort($tiers, fn($a, $b) => $a['max_weight'] <=> $b['max_weight']);
             Configuration::updateValue('CDS2_SHIPPING_TIERS', json_encode($tiers));
         }
-
         return $this->displayConfirmation($this->l('Configurazione salvata.'));
     }
 
@@ -248,9 +240,7 @@ class Cdsync extends Module
     {
         $ids  = Tools::getValue('map_id',  []);
         $cdss = Tools::getValue('map_cds', []);
-        if (!is_array($ids)) {
-            return $this->displayError($this->l('Nessun dato.'));
-        }
+        if (!is_array($ids)) { return $this->displayError($this->l('Nessun dato.')); }
         $p = _DB_PREFIX_;
         foreach ($ids as $i => $rawId) {
             $idCategory = (int) $rawId;
@@ -279,11 +269,11 @@ class Cdsync extends Module
         $enabled = Tools::getValue('enabled_products', []);
         if (!is_array($enabled)) { $enabled = []; }
 
-        // disable all, then re-enable selected
         Db::getInstance()->execute("UPDATE `{$p}cds2_product` SET enabled=0");
-
         foreach ($enabled as $key) {
-            [$idP, $idA] = array_map('intval', explode('_', $key . '_0'));
+            $parts = explode('_', $key . '_0');
+            $idP   = (int) $parts[0];
+            $idA   = (int) $parts[1];
             Db::getInstance()->execute(
                 "INSERT INTO `{$p}cds2_product` (id_product,id_product_attribute,enabled)
                  VALUES ({$idP},{$idA},1)
@@ -304,6 +294,12 @@ class Cdsync extends Module
         header('Content-Type: application/json; charset=utf-8');
         try {
             switch ($action) {
+                case 'test_ollama':
+                    echo json_encode($this->ajaxTestOllama());
+                    break;
+                case 'test_gemini':
+                    echo json_encode($this->ajaxTestGemini());
+                    break;
                 case 'translate_one':
                     echo json_encode($this->ajaxTranslateOne());
                     break;
@@ -321,6 +317,79 @@ class Cdsync extends Module
         }
     }
 
+    private function ajaxTestOllama()
+    {
+        $endpoint = rtrim((string) Tools::getValue('endpoint', Configuration::get('CDS2_AI_ENDPOINT')), '/');
+        $model    = (string) Tools::getValue('model', Configuration::get('CDS2_AI_MODEL'));
+
+        // Remove /api/generate suffix if present to build base URL
+        $base = preg_replace('#/api/generate$#', '', $endpoint);
+        $url  = rtrim($base, '/') . '/api/generate';
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_POSTFIELDS     => json_encode([
+                'model'  => $model,
+                'prompt' => 'Rispondi solo "OK"',
+                'stream' => false,
+            ]),
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($err) {
+            return ['success' => false, 'message' => 'Errore cURL: ' . $err];
+        }
+        if ($code < 200 || $code >= 300) {
+            return ['success' => false, 'message' => "HTTP {$code}: " . substr($body, 0, 200)];
+        }
+        $data     = json_decode($body, true);
+        $response = trim((string)($data['response'] ?? ''));
+        if ($response === '') {
+            return ['success' => false, 'message' => 'Risposta vuota dal modello. Corpo: ' . substr($body, 0, 300)];
+        }
+        return ['success' => true, 'message' => 'Connessione OK. Risposta: ' . $response];
+    }
+
+    private function ajaxTestGemini()
+    {
+        $key = (string) Tools::getValue('key', Configuration::get('CDS2_GEMINI_KEY'));
+        if (!$key) {
+            return ['success' => false, 'message' => 'Chiave API Gemini non inserita.'];
+        }
+        $url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' . urlencode($key);
+        $payload = ['contents' => [['parts' => [['text' => 'Rispondi solo "OK"']]]]];
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 20,
+            CURLOPT_POSTFIELDS     => json_encode($payload),
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($err) { return ['success' => false, 'message' => 'Errore cURL: ' . $err]; }
+        if ($code >= 400) { return ['success' => false, 'message' => "HTTP {$code}: " . substr($body, 0, 300)]; }
+
+        $data     = json_decode($body, true);
+        $response = trim((string)($data['candidates'][0]['content']['parts'][0]['text'] ?? ''));
+        if ($response === '') {
+            return ['success' => false, 'message' => 'Risposta vuota. Corpo: ' . substr($body, 0, 300)];
+        }
+        return ['success' => true, 'message' => 'Connessione OK. Risposta: ' . $response];
+    }
+
     private function ajaxTranslateOne()
     {
         $idProduct = (int) Tools::getValue('id_product');
@@ -329,7 +398,7 @@ class Cdsync extends Module
             return ['success' => false, 'message' => 'ID prodotto mancante'];
         }
 
-        $idLang = $this->getItalianLangId();
+        $idLang  = $this->getItalianLangId();
         $product = new Product($idProduct, false, $idLang);
         $title   = trim((string) $product->name);
         $short   = trim(strip_tags((string) $product->description_short));
@@ -342,7 +411,6 @@ class Cdsync extends Module
         $hash = md5($title . '|' . $short . '|' . $desc);
         $p    = _DB_PREFIX_;
 
-        // check if already translated and not changed
         $existing = Db::getInstance()->getRow(
             "SELECT src_hash, status FROM `{$p}cds2_translation`
              WHERE id_product={$idProduct} AND id_product_attribute={$idAttr}"
@@ -351,20 +419,17 @@ class Cdsync extends Module
             return ['success' => true, 'message' => 'Già tradotto (invariato)', 'skipped' => true];
         }
 
-        // translate each field
-        $titleFr = $this->ollamaTranslate($title);
+        $titleFr = $this->translate($title);
         if ($titleFr === null) {
-            return ['success' => false, 'message' => 'Ollama non raggiungibile o risposta vuota per il titolo'];
+            return ['success' => false, 'message' => $this->lastTranslateError ?: 'Errore traduzione titolo'];
         }
-
-        $shortFr = $short ? $this->ollamaTranslate($short) : '';
+        $shortFr = $short ? $this->translate($short) : '';
         if ($short && $shortFr === null) {
-            return ['success' => false, 'message' => 'Ollama: errore sulla descrizione breve'];
+            return ['success' => false, 'message' => $this->lastTranslateError ?: 'Errore traduzione descrizione breve'];
         }
-
-        $descFr = $desc ? $this->ollamaTranslate($desc) : '';
+        $descFr = $desc ? $this->translate($desc) : '';
         if ($desc && $descFr === null) {
-            return ['success' => false, 'message' => 'Ollama: errore sulla descrizione lunga'];
+            return ['success' => false, 'message' => $this->lastTranslateError ?: 'Errore traduzione descrizione lunga'];
         }
 
         Db::getInstance()->execute(
@@ -375,12 +440,14 @@ class Cdsync extends Module
                  '" . pSQL((string)$shortFr) . "','" . pSQL((string)$descFr) . "',
                  'done',NOW(),'')
              ON DUPLICATE KEY UPDATE
-                 src_hash='" . pSQL($hash) . "',title_fr='" . pSQL((string)$titleFr) . "',
-                 desc_short_fr='" . pSQL((string)$shortFr) . "',desc_fr='" . pSQL((string)$descFr) . "',
+                 src_hash='" . pSQL($hash) . "',
+                 title_fr='" . pSQL((string)$titleFr) . "',
+                 desc_short_fr='" . pSQL((string)$shortFr) . "',
+                 desc_fr='" . pSQL((string)$descFr) . "',
                  status='done',updated_at=NOW(),last_error=''"
         );
 
-        return ['success' => true, 'message' => 'Tradotto: ' . $titleFr];
+        return ['success' => true, 'message' => $titleFr];
     }
 
     private function ajaxSyncOne()
@@ -418,22 +485,20 @@ class Cdsync extends Module
     private function renderTabs()
     {
         $tabs = [
-            'config'      => ['icon' => '⚙️', 'label' => '1. Configurazione'],
-            'categories'  => ['icon' => '🗂️', 'label' => '2. Categorie'],
-            'products'    => ['icon' => '📦', 'label' => '3. Prodotti'],
-            'translations'=> ['icon' => '🌐', 'label' => '4. Traduzioni'],
-            'sync'        => ['icon' => '🔄', 'label' => '5. Sincronizza'],
-            'orders'      => ['icon' => '📋', 'label' => '6. Ordini'],
+            'config'       => '⚙️ 1. Configurazione',
+            'categories'   => '🗂️ 2. Categorie',
+            'products'     => '📦 3. Prodotti',
+            'translations' => '🌐 4. Traduzioni',
+            'sync'         => '🔄 5. Sincronizza',
+            'orders'       => '📋 6. Ordini',
         ];
-
         $html = '<ul class="nav nav-tabs" style="margin-bottom:20px;margin-top:10px;">';
-        foreach ($tabs as $key => $tab) {
+        foreach ($tabs as $key => $label) {
             $active = ($key === $this->currentTab) ? 'active' : '';
             $url    = htmlspecialchars($this->adminUrl(['cds_tab' => $key]), ENT_QUOTES, 'UTF-8');
-            $html  .= "<li class='{$active}'><a href='{$url}'>{$tab['icon']} {$tab['label']}</a></li>";
+            $html  .= "<li class='{$active}'><a href='{$url}'>{$label}</a></li>";
         }
-        $html .= '</ul>';
-        return $html;
+        return $html . '</ul>';
     }
 
     private function renderCurrentTab()
@@ -449,7 +514,7 @@ class Cdsync extends Module
                 default:             return $this->renderTabConfig();
             }
         } catch (Throwable $e) {
-            return $this->displayError('Errore nel rendering del tab: ' . $e->getMessage());
+            return $this->displayError('Errore nel tab: ' . $e->getMessage());
         }
     }
 
@@ -460,14 +525,16 @@ class Cdsync extends Module
     private function renderTabConfig()
     {
         $action = htmlspecialchars($this->adminUrl(['cds_tab' => 'config']), ENT_QUOTES, 'UTF-8');
-
         $f = fn($k) => htmlspecialchars((string) Configuration::get($k), ENT_QUOTES, 'UTF-8');
+
         $clientId     = $f('CDS2_CLIENT_ID');
         $clientSecret = $f('CDS2_CLIENT_SECRET');
         $sellerId     = $f('CDS2_SELLER_ID');
+        $commission   = $f('CDS2_COMMISSION_RATE');
+        $aiProvider   = (string) Configuration::get('CDS2_AI_PROVIDER') ?: 'ollama';
         $aiEndpoint   = $f('CDS2_AI_ENDPOINT');
         $aiModel      = $f('CDS2_AI_MODEL');
-        $commission   = $f('CDS2_COMMISSION_RATE');
+        $geminiKey    = $f('CDS2_GEMINI_KEY');
         $cronToken    = $f('CDS2_CRON_TOKEN');
         $cronUrl      = htmlspecialchars(
             _PS_BASE_URL_ . __PS_BASE_URI__ . 'modules/cdsync/cron/sync.php?token=' . Configuration::get('CDS2_CRON_TOKEN'),
@@ -476,76 +543,166 @@ class Cdsync extends Module
 
         $tiers     = json_decode(Configuration::get('CDS2_SHIPPING_TIERS') ?: '[]', true) ?: [];
         $tiersRows = '';
-        foreach ($tiers as $i => $t) {
+        foreach ($tiers as $t) {
             $w = htmlspecialchars((string)$t['max_weight'], ENT_QUOTES, 'UTF-8');
-            $p = htmlspecialchars((string)$t['price'], ENT_QUOTES, 'UTF-8');
-            $tiersRows .= "
-            <tr>
+            $pr = htmlspecialchars((string)$t['price'], ENT_QUOTES, 'UTF-8');
+            $tiersRows .= "<tr>
                 <td><input type='number' step='0.1' name='tier_weight[]' value='{$w}' class='form-control' style='width:100px;'> kg</td>
-                <td><input type='number' step='0.01' name='tier_price[]' value='{$p}' class='form-control' style='width:100px;'> €</td>
+                <td><input type='number' step='0.01' name='tier_price[]' value='{$pr}' class='form-control' style='width:100px;'> €</td>
                 <td><button type='button' class='btn btn-xs btn-danger' onclick='this.closest(\"tr\").remove()'>✕</button></td>
             </tr>";
         }
+
+        $selOllama = $aiProvider === 'ollama' ? 'selected' : '';
+        $selGemini = $aiProvider === 'gemini' ? 'selected' : '';
+
+        $testOllamaUrl = json_encode($this->adminUrl(['cds_ajax' => 'test_ollama']));
+        $testGeminiUrl = json_encode($this->adminUrl(['cds_ajax' => 'test_gemini']));
 
         return <<<HTML
 <div class="panel">
     <h3>⚙️ Configurazione API Octopia (Cdiscount)</h3>
     <form method="post" action="{$action}">
-        <div class="form-group">
-            <label>Client ID</label>
-            <input type="text" name="CDS2_CLIENT_ID" value="{$clientId}" class="form-control">
-        </div>
-        <div class="form-group">
-            <label>Client Secret</label>
-            <input type="password" name="CDS2_CLIENT_SECRET" value="{$clientSecret}" class="form-control">
-        </div>
-        <div class="form-group">
-            <label>Seller ID</label>
-            <input type="text" name="CDS2_SELLER_ID" value="{$sellerId}" class="form-control">
-        </div>
-        <hr>
-        <h4>Commissione Cdiscount</h4>
-        <div class="form-group">
-            <label>Percentuale commissione (%)</label>
-            <input type="number" step="0.1" name="CDS2_COMMISSION_RATE" value="{$commission}" class="form-control" style="width:120px;">
-            <p class="help-block">Prezzo CDS = (Prezzo PS + Spedizione) / (1 - commissione%)</p>
-        </div>
-        <h4>Fasce spedizione</h4>
-        <table class="table table-bordered" id="tiers-table" style="max-width:400px;">
-            <thead><tr><th>Peso max</th><th>Costo spedizione</th><th></th></tr></thead>
-            <tbody>{$tiersRows}</tbody>
-        </table>
-        <button type="button" class="btn btn-default btn-sm" onclick="addTierRow()">+ Aggiungi fascia</button>
-        <hr>
-        <h4>Traduzione AI (Ollama)</h4>
-        <div class="form-group">
-            <label>Endpoint Ollama</label>
-            <input type="text" name="CDS2_AI_ENDPOINT" value="{$aiEndpoint}" class="form-control">
-        </div>
-        <div class="form-group">
-            <label>Modello</label>
-            <input type="text" name="CDS2_AI_MODEL" value="{$aiModel}" class="form-control" style="width:220px;">
+        <div class="row">
+            <div class="col-md-6">
+                <div class="form-group">
+                    <label>Client ID</label>
+                    <input type="text" name="CDS2_CLIENT_ID" value="{$clientId}" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label>Client Secret</label>
+                    <input type="password" name="CDS2_CLIENT_SECRET" value="{$clientSecret}" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label>Seller ID</label>
+                    <input type="text" name="CDS2_SELLER_ID" value="{$sellerId}" class="form-control">
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="form-group">
+                    <label>Commissione Cdiscount (%)</label>
+                    <input type="number" step="0.1" name="CDS2_COMMISSION_RATE" value="{$commission}" class="form-control">
+                    <p class="help-block">Prezzo CDS = (Prezzo PS + Spedizione) / (1 - commissione%)</p>
+                </div>
+                <h5>Fasce spedizione</h5>
+                <table class="table table-condensed" id="tiers-table">
+                    <thead><tr><th>Peso max</th><th>Costo</th><th></th></tr></thead>
+                    <tbody>{$tiersRows}</tbody>
+                </table>
+                <button type="button" class="btn btn-default btn-xs" onclick="addTierRow()">+ Aggiungi fascia</button>
+            </div>
         </div>
         <hr>
-        <h4>Cron automatico (ogni 30 min)</h4>
+        <h4>🤖 Traduzione AI</h4>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="form-group">
+                    <label>Provider traduzione</label>
+                    <select name="CDS2_AI_PROVIDER" id="ai-provider" class="form-control" onchange="toggleAiProvider(this.value)">
+                        <option value="ollama" {$selOllama}>Ollama (self-hosted)</option>
+                        <option value="gemini" {$selGemini}>Google Gemini (gratuito)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        <div id="section-ollama" style="display:{$selOllama};border-left:3px solid #ccc;padding-left:15px;margin-bottom:10px;">
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="form-group">
+                        <label>Endpoint Ollama</label>
+                        <input type="text" name="CDS2_AI_ENDPOINT" id="ollama-endpoint" value="{$aiEndpoint}" class="form-control"
+                               placeholder="https://ollama.masterbrico.com/api/generate">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="form-group">
+                        <label>Modello</label>
+                        <input type="text" name="CDS2_AI_MODEL" id="ollama-model" value="{$aiModel}" class="form-control"
+                               placeholder="qwen2.5:1.5b">
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <div class="form-group">
+                        <label>&nbsp;</label><br>
+                        <button type="button" class="btn btn-info" onclick="testOllama()">🔌 Test</button>
+                    </div>
+                </div>
+            </div>
+            <div id="ollama-test-result" style="margin-bottom:10px;"></div>
+        </div>
+        <div id="section-gemini" style="display:{$selGemini};border-left:3px solid #4285f4;padding-left:15px;margin-bottom:10px;">
+            <div class="row">
+                <div class="col-md-8">
+                    <div class="form-group">
+                        <label>Google Gemini API Key</label>
+                        <input type="text" name="CDS2_GEMINI_KEY" id="gemini-key" value="{$geminiKey}" class="form-control"
+                               placeholder="AIzaSy...">
+                        <p class="help-block">Ottieni la chiave gratuita su <strong>aistudio.google.com/app/apikey</strong> → Create API key</p>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <div class="form-group">
+                        <label>&nbsp;</label><br>
+                        <button type="button" class="btn btn-info" onclick="testGemini()">🔌 Test</button>
+                    </div>
+                </div>
+            </div>
+            <div id="gemini-test-result" style="margin-bottom:10px;"></div>
+        </div>
+        <hr>
+        <h4>⏱ Cron automatico (ogni 30 min)</h4>
         <div class="form-group">
-            <label>Token cron</label>
-            <input type="text" value="{$cronToken}" class="form-control" style="max-width:340px;" readonly>
+            <label>Token</label>
+            <input type="text" value="{$cronToken}" class="form-control" style="max-width:320px;" readonly>
         </div>
         <div class="form-group">
-            <label>URL da aggiungere al cron</label>
+            <label>URL cron</label>
             <input type="text" value="{$cronUrl}" class="form-control" readonly onclick="this.select()">
-            <p class="help-block">Esempio: <code>*/30 * * * * curl -s "{$cronUrl}" &gt; /dev/null</code></p>
+            <code style="display:block;margin-top:4px;">*/30 * * * * curl -s "{$cronUrl}" &gt; /dev/null</code>
         </div>
-        <button type="submit" name="submitCds2Config" value="1" class="btn btn-primary">💾 Salva configurazione</button>
+        <button type="submit" name="submitCds2Config" value="1" class="btn btn-primary btn-lg">💾 Salva configurazione</button>
     </form>
 </div>
 <script>
+var _testOllamaUrl = {$testOllamaUrl};
+var _testGeminiUrl = {$testGeminiUrl};
+
+function toggleAiProvider(v){
+    document.getElementById('section-ollama').style.display = v==='ollama' ? '' : 'none';
+    document.getElementById('section-gemini').style.display = v==='gemini' ? '' : 'none';
+}
 function addTierRow(){
-    var tbody=document.querySelector('#tiers-table tbody');
-    var tr=document.createElement('tr');
-    tr.innerHTML="<td><input type='number' step='0.1' name='tier_weight[]' value='' class='form-control' style='width:100px;'> kg</td><td><input type='number' step='0.01' name='tier_price[]' value='' class='form-control' style='width:100px;'> €</td><td><button type='button' class='btn btn-xs btn-danger' onclick='this.closest(\"tr\").remove()'>✕</button></td>";
+    var tbody = document.querySelector('#tiers-table tbody');
+    var tr = document.createElement('tr');
+    tr.innerHTML = "<td><input type='number' step='0.1' name='tier_weight[]' value='' class='form-control' style='width:100px;'> kg</td><td><input type='number' step='0.01' name='tier_price[]' value='' class='form-control' style='width:100px;'> €</td><td><button type='button' class='btn btn-xs btn-danger' onclick='this.closest(\"tr\").remove()'>✕</button></td>";
     tbody.appendChild(tr);
+}
+function testOllama(){
+    var ep  = document.getElementById('ollama-endpoint').value;
+    var mdl = document.getElementById('ollama-model').value;
+    var div = document.getElementById('ollama-test-result');
+    div.innerHTML = '<span class="label label-default">⏳ Test in corso...</span>';
+    fetch(_testOllamaUrl + '&endpoint=' + encodeURIComponent(ep) + '&model=' + encodeURIComponent(mdl))
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            div.innerHTML = d.success
+                ? '<span class="label label-success">✓ ' + d.message + '</span>'
+                : '<span class="label label-danger">✗ ' + d.message + '</span>';
+        })
+        .catch(function(e){ div.innerHTML = '<span class="label label-danger">✗ Fetch error: '+e.message+'</span>'; });
+}
+function testGemini(){
+    var key = document.getElementById('gemini-key').value;
+    var div = document.getElementById('gemini-test-result');
+    div.innerHTML = '<span class="label label-default">⏳ Test in corso...</span>';
+    fetch(_testGeminiUrl + '&key=' + encodeURIComponent(key))
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            div.innerHTML = d.success
+                ? '<span class="label label-success">✓ ' + d.message + '</span>'
+                : '<span class="label label-danger">✗ ' + d.message + '</span>';
+        })
+        .catch(function(e){ div.innerHTML = '<span class="label label-danger">✗ Fetch error: '+e.message+'</span>'; });
 }
 </script>
 HTML;
@@ -567,17 +724,16 @@ HTML;
 
         $mapHtml = '';
         foreach ($mapRows as $r) {
-            $idCat    = (int) $r['id_category'];
-            $psName   = htmlspecialchars((string) $r['ps_name'], ENT_QUOTES, 'UTF-8');
-            $cdsRef   = (string) $r['cds_reference'];
-            $cdsLabel = (string) $r['cds_label'];
-            $display  = $cdsRef ? htmlspecialchars($cdsRef . ' – ' . $cdsLabel, ENT_QUOTES, 'UTF-8') : '';
+            $idCat   = (int) $r['id_category'];
+            $psName  = htmlspecialchars((string) $r['ps_name'], ENT_QUOTES, 'UTF-8');
+            $cdsRef  = (string) $r['cds_reference'];
+            $cdsLbl  = (string) $r['cds_label'];
+            $display = $cdsRef ? htmlspecialchars($cdsRef . ' – ' . $cdsLbl, ENT_QUOTES, 'UTF-8') : '';
             $mapHtml .= "<tr>
                 <td>{$idCat}<input type='hidden' name='map_id[]' value='{$idCat}'></td>
                 <td>{$psName}</td>
                 <td><input list='cds2-cat-list' type='text' name='map_cds[]' value='{$display}'
-                    class='form-control' placeholder='Cerca categoria CDS...' style='min-width:320px;'>
-                </td>
+                    class='form-control' placeholder='Cerca categoria CDS...' style='min-width:320px;'></td>
             </tr>";
         }
 
@@ -608,13 +764,13 @@ HTML;
         </div>
         <button type="submit" name="submitCds2CategoryMap" value="1" class="btn btn-primary">💾 Salva mapping</button>
     </form>
-    <p class="help-block">Digita il nome o il codice della categoria per filtrare. Usa solo categorie di livello 3.</p>
+    <p class="help-block">Digita il nome o il codice categoria per filtrare. Usa solo categorie di livello 3.</p>
 </div>
 HTML;
     }
 
     // =========================================================================
-    // TAB 3 – PRODOTTI
+    // TAB 3 – PRODOTTI  (con filtri colonne)
     // =========================================================================
 
     private function renderTabProducts()
@@ -634,42 +790,41 @@ HTML;
             $key     = $idP . '_' . $idA;
             $sku     = htmlspecialchars(trim((string)($r['sku_attr'] ?: $r['sku_product'])), ENT_QUOTES, 'UTF-8');
             $ean     = htmlspecialchars(trim((string)($r['ean_attr'] ?: $r['ean_product'])), ENT_QUOTES, 'UTF-8');
-            $name    = htmlspecialchars((string) $r['name'] . ($r['combo'] ? ' – ' . $r['combo'] : ''), ENT_QUOTES, 'UTF-8');
-            $price   = number_format((float) $r['price'], 2, ',', '.');
-            $stock   = (int) $r['quantity'];
+            $name    = htmlspecialchars((string)$r['name'] . ($r['combo'] ? ' – ' . $r['combo'] : ''), ENT_QUOTES, 'UTF-8');
+            $price   = number_format((float)$r['price'], 2, ',', '.');
+            $stock   = (int)$r['quantity'];
             $enabled = $r['enabled'] ? 'checked' : '';
 
-            $statusLabel = '';
-            if ($r['cds_status'] === 'synced') {
-                $statusLabel = '<span class="label label-success">synced</span>';
-            } elseif ($r['cds_status'] === 'error') {
-                $errTip = htmlspecialchars((string) $r['last_error'], ENT_QUOTES, 'UTF-8');
-                $statusLabel = "<span class='label label-danger' title='{$errTip}'>errore</span>";
-            } elseif ($r['enabled']) {
-                $statusLabel = '<span class="label label-warning">in attesa</span>';
+            switch ($r['cds_status']) {
+                case 'synced': $badge = '<span class="label label-success">synced</span>'; break;
+                case 'error':
+                    $et = htmlspecialchars((string)$r['last_error'], ENT_QUOTES, 'UTF-8');
+                    $badge = "<span class='label label-danger' title='{$et}'>errore</span>";
+                    break;
+                default: $badge = $r['enabled'] ? '<span class="label label-warning">in attesa</span>' : '';
             }
 
             $tableRows .= "<tr>
-                <td><input type='checkbox' name='enabled_products[]' value='{$key}' {$enabled}></td>
-                <td>{$name}</td>
-                <td>{$sku}</td>
-                <td>{$ean}</td>
-                <td>€{$price}</td>
-                <td>{$stock}</td>
-                <td>{$statusLabel}</td>
+                <td><input type='checkbox' name='enabled_products[]' value='{$key}' {$enabled} class='prod-chk'></td>
+                <td class='col-name'>{$name}</td>
+                <td class='col-sku'>{$sku}</td>
+                <td class='col-ean'>{$ean}</td>
+                <td class='col-price'>€{$price}</td>
+                <td class='col-stock'>{$stock}</td>
+                <td class='col-status'>{$badge}</td>
             </tr>";
         }
 
         // pagination
-        $paginationHtml = '';
+        $paging = '';
         if ($pages > 1) {
-            $paginationHtml = '<nav><ul class="pagination">';
+            $paging = '<nav><ul class="pagination" style="margin:10px 0;">';
             for ($i = 1; $i <= $pages; $i++) {
-                $pgUrl    = htmlspecialchars($this->adminUrl(['cds_tab' => 'products', 'p' => $i]), ENT_QUOTES, 'UTF-8');
-                $active   = ($i === $page) ? 'class="active"' : '';
-                $paginationHtml .= "<li {$active}><a href='{$pgUrl}'>{$i}</a></li>";
+                $pu = htmlspecialchars($this->adminUrl(['cds_tab' => 'products', 'p' => $i]), ENT_QUOTES, 'UTF-8');
+                $ac = ($i === $page) ? 'class="active"' : '';
+                $paging .= "<li {$ac}><a href='{$pu}'>{$i}</a></li>";
             }
-            $paginationHtml .= '</ul></nav>';
+            $paging .= '</ul></nav>';
         }
 
         $enabledCount = (int) Db::getInstance()->getValue(
@@ -679,34 +834,93 @@ HTML;
         return <<<HTML
 <div class="panel">
     <h3>📦 Prodotti ({$total} totali, {$enabledCount} selezionati per sync)</h3>
-    <p>Seleziona i prodotti da sincronizzare con Cdiscount. Mostra {$limit} prodotti per pagina.</p>
-    <form method="post" action="{$action}">
-        <div style="margin-bottom:10px;">
-            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(true)">✅ Seleziona tutti</button>
-            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(false)">⬜ Deseleziona tutti</button>
+    <form method="post" action="{$action}" id="prod-form">
+        <div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(true)">✅ Tutti</button>
+            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(false)">⬜ Nessuno</button>
+            <button type="button" class="btn btn-default btn-sm" onclick="toggleEnabled()">🔄 Solo abilitati</button>
+            <span style="flex:1;"></span>
+            <button type="submit" name="submitCds2Products" value="1" class="btn btn-primary">💾 Salva selezione</button>
         </div>
+
+        <!-- Filtri colonne -->
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
+            <div><label style="font-size:11px;display:block;">🔍 Prodotto</label>
+                <input type="text" id="f-name" class="form-control input-sm" placeholder="Filtra nome..." oninput="filterTable()" style="width:220px;"></div>
+            <div><label style="font-size:11px;display:block;">SKU</label>
+                <input type="text" id="f-sku" class="form-control input-sm" placeholder="SKU..." oninput="filterTable()" style="width:120px;"></div>
+            <div><label style="font-size:11px;display:block;">EAN</label>
+                <input type="text" id="f-ean" class="form-control input-sm" placeholder="EAN..." oninput="filterTable()" style="width:140px;"></div>
+            <div><label style="font-size:11px;display:block;">Stock min</label>
+                <input type="number" id="f-stock" class="form-control input-sm" placeholder="es. 1" oninput="filterTable()" style="width:80px;"></div>
+            <div><label style="font-size:11px;display:block;">Stato CDS</label>
+                <select id="f-status" class="form-control input-sm" onchange="filterTable()" style="width:120px;">
+                    <option value="">Tutti</option>
+                    <option value="synced">synced</option>
+                    <option value="errore">errore</option>
+                    <option value="in attesa">in attesa</option>
+                </select>
+            </div>
+            <button type="button" class="btn btn-default btn-sm" onclick="clearFilters()">✕ Reset</button>
+        </div>
+
         <div class="table-responsive">
-        <table class="table table-bordered table-striped table-hover" style="font-size:13px;">
+        <table class="table table-bordered table-striped table-hover" style="font-size:13px;" id="prod-table">
             <thead>
                 <tr>
-                    <th style="width:30px;"><input type="checkbox" id="check-all" onchange="toggleAll(this.checked)"></th>
+                    <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)"></th>
                     <th>Prodotto</th><th>SKU</th><th>EAN</th><th>Prezzo PS</th><th>Stock</th><th>Stato CDS</th>
                 </tr>
             </thead>
             <tbody>{$tableRows}</tbody>
         </table>
         </div>
-        {$paginationHtml}
-        <button type="submit" name="submitCds2Products" value="1" class="btn btn-primary btn-lg">
-            💾 Salva selezione
-        </button>
+        <div id="filter-count" style="font-size:12px;color:#888;margin-bottom:6px;"></div>
+        {$paging}
+        <button type="submit" name="submitCds2Products" value="1" class="btn btn-primary">💾 Salva selezione</button>
     </form>
 </div>
 <script>
 function toggleAll(v){
-    document.querySelectorAll('input[name="enabled_products[]"]').forEach(function(c){c.checked=v;});
-    var ca=document.getElementById('check-all');
-    if(ca) ca.checked=v;
+    document.querySelectorAll('.prod-chk').forEach(function(c){ if(c.closest('tr').style.display!=='none') c.checked=v; });
+    var ca=document.getElementById('chk-all'); if(ca) ca.checked=v;
+}
+function toggleEnabled(){
+    document.querySelectorAll('.prod-chk').forEach(function(c){ c.checked=c.defaultChecked; });
+}
+function clearFilters(){
+    ['f-name','f-sku','f-ean','f-stock'].forEach(function(id){ document.getElementById(id).value=''; });
+    document.getElementById('f-status').value='';
+    filterTable();
+}
+function filterTable(){
+    var fName   = document.getElementById('f-name').value.toLowerCase();
+    var fSku    = document.getElementById('f-sku').value.toLowerCase();
+    var fEan    = document.getElementById('f-ean').value.toLowerCase();
+    var fStock  = parseInt(document.getElementById('f-stock').value) || 0;
+    var fStatus = document.getElementById('f-status').value.toLowerCase();
+
+    var rows    = document.querySelectorAll('#prod-table tbody tr');
+    var visible = 0;
+    rows.forEach(function(tr){
+        var name   = (tr.querySelector('.col-name')   || {}).textContent || '';
+        var sku    = (tr.querySelector('.col-sku')    || {}).textContent || '';
+        var ean    = (tr.querySelector('.col-ean')    || {}).textContent || '';
+        var stock  = parseInt((tr.querySelector('.col-stock')  || {}).textContent) || 0;
+        var status = (tr.querySelector('.col-status') || {}).textContent || '';
+
+        var show = (!fName   || name.toLowerCase().includes(fName))
+                && (!fSku    || sku.toLowerCase().includes(fSku))
+                && (!fEan    || ean.toLowerCase().includes(fEan))
+                && (!fStock  || stock >= fStock)
+                && (!fStatus || status.toLowerCase().includes(fStatus));
+
+        tr.style.display = show ? '' : 'none';
+        if(show) visible++;
+    });
+    document.getElementById('filter-count').textContent = visible < rows.length
+        ? ('Mostrati ' + visible + ' di ' + rows.length + ' prodotti in questa pagina')
+        : '';
 }
 </script>
 HTML;
@@ -718,8 +932,9 @@ HTML;
 
     private function renderTabTranslations()
     {
-        $p     = _DB_PREFIX_;
-        $total = (int) Db::getInstance()->getValue(
+        $p      = _DB_PREFIX_;
+        $idLang = (int) $this->getItalianLangId();
+        $total  = (int) Db::getInstance()->getValue(
             "SELECT COUNT(*) FROM `{$p}cds2_product` WHERE enabled=1"
         );
         $done = (int) Db::getInstance()->getValue(
@@ -735,38 +950,42 @@ HTML;
                     COALESCE(t.title_fr,'') AS title_fr,
                     COALESCE(t.last_error,'') AS tr_error
              FROM `{$p}cds2_product` cp
-             LEFT JOIN `{$p}product_lang` pl ON pl.id_product=cp.id_product AND pl.id_lang=" . (int)$this->getItalianLangId() . "
+             LEFT JOIN `{$p}product_lang` pl ON pl.id_product=cp.id_product AND pl.id_lang={$idLang}
              LEFT JOIN `{$p}cds2_translation` t ON t.id_product=cp.id_product AND t.id_product_attribute=cp.id_product_attribute
              WHERE cp.enabled=1
              ORDER BY name ASC"
         );
         if (!is_array($rows)) { $rows = []; }
 
+        $provider = Configuration::get('CDS2_AI_PROVIDER') ?: 'ollama';
+        $providerLabel = $provider === 'gemini' ? 'Google Gemini' : 'Ollama';
+
         $tableRows = '';
         foreach ($rows as $r) {
             $idP   = (int) $r['id_product'];
             $idA   = (int) $r['id_product_attribute'];
             $key   = $idP . '_' . $idA;
-            $name  = htmlspecialchars((string) $r['name'], ENT_QUOTES, 'UTF-8');
-            $trFr  = htmlspecialchars((string) $r['title_fr'], ENT_QUOTES, 'UTF-8');
-            $trErr = htmlspecialchars((string) $r['tr_error'], ENT_QUOTES, 'UTF-8');
-            $status = (string) $r['tr_status'];
+            $name  = htmlspecialchars((string)$r['name'], ENT_QUOTES, 'UTF-8');
+            $trFr  = htmlspecialchars((string)$r['title_fr'], ENT_QUOTES, 'UTF-8');
+            $trErr = htmlspecialchars((string)$r['tr_error'], ENT_QUOTES, 'UTF-8');
 
-            if ($status === 'done') {
-                $badge = '<span class="label label-success">✓ tradotto</span>';
-            } elseif ($status === 'error') {
-                $badge = '<span class="label label-danger" title="' . $trErr . '">✗ errore</span>';
-            } else {
-                $badge = '<span class="label label-default">in attesa</span>';
+            switch ($r['tr_status']) {
+                case 'done':
+                    $badge = '<span class="label label-success">✓ tradotto</span>';
+                    break;
+                case 'error':
+                    $badge = '<span class="label label-danger" title="'.$trErr.'">✗ errore</span>'
+                           . ($trErr ? '<br><small class="text-danger">'.$trErr.'</small>' : '');
+                    break;
+                default:
+                    $badge = '<span class="label label-default">in attesa</span>';
             }
-
-            $errRow = $trErr ? "<br><small class='text-danger'>{$trErr}</small>" : '';
 
             $tableRows .= "<tr id='tr-row-{$key}'>
                 <td><input type='checkbox' class='tr-check' value='{$key}' data-idp='{$idP}' data-ida='{$idA}' checked></td>
                 <td>{$name}</td>
-                <td id='tr-fr-{$key}'>{$trFr}</td>
-                <td id='tr-status-{$key}'>{$badge}{$errRow}</td>
+                <td id='tr-fr-{$key}' style='max-width:300px;font-size:12px;'>{$trFr}</td>
+                <td id='tr-status-{$key}'>{$badge}</td>
             </tr>";
         }
 
@@ -774,26 +993,23 @@ HTML;
 
         return <<<HTML
 <div class="panel">
-    <h3>🌐 Traduzioni IT → FR via Ollama</h3>
-    <p>Tradotti: <strong>{$done} / {$total}</strong> prodotti selezionati.</p>
-    <div style="margin-bottom:12px;">
-        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllTr(true)">✅ Seleziona tutti</button>
-        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllTr(false)">⬜ Deseleziona tutti</button>
-        <button type="button" id="btn-tr-start" class="btn btn-primary" onclick="startTranslation()">
-            ▶ Traduci selezionati
-        </button>
-        <button type="button" id="btn-tr-stop" class="btn btn-danger" onclick="stopTranslation()" style="display:none;">
-            ⏹ Ferma
-        </button>
+    <h3>🌐 Traduzioni IT → FR &nbsp;<small>via {$providerLabel}</small></h3>
+    <p>Tradotti: <strong>{$done} / {$total}</strong> &nbsp;
+       <a href="{$this->adminUrl(['cds_tab' => 'config'])}" style="font-size:12px;">Cambia provider →</a>
+    </p>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllTr(true)">✅ Tutti</button>
+        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllTr(false)">⬜ Nessuno</button>
+        <button type="button" class="btn btn-default btn-sm" onclick="selectUntranslated()">🔄 Solo non tradotti</button>
+        <button type="button" id="btn-tr-start" class="btn btn-primary" onclick="startTranslation()">▶ Traduci selezionati</button>
+        <button type="button" id="btn-tr-stop"  class="btn btn-danger" onclick="stopTranslation()" style="display:none;">⏹ Ferma</button>
     </div>
     <div id="tr-progress" style="display:none;margin-bottom:10px;">
-        <div class="progress">
-            <div id="tr-bar" class="progress-bar" role="progressbar" style="width:0%">0%</div>
-        </div>
+        <div class="progress"><div id="tr-bar" class="progress-bar" style="width:0%">0%</div></div>
         <small id="tr-info"></small>
     </div>
     <div class="table-responsive">
-    <table class="table table-bordered table-striped table-hover" style="font-size:13px;">
+    <table class="table table-bordered table-hover" style="font-size:13px;">
         <thead>
             <tr>
                 <th style="width:30px;"><input type="checkbox" onchange="toggleAllTr(this.checked)"></th>
@@ -806,56 +1022,56 @@ HTML;
 </div>
 <script>
 var _trStop = false;
-var _ajaxUrl = {$ajaxUrl};
+var _trAjax = {$ajaxUrl};
 
-function toggleAllTr(v){
-    document.querySelectorAll('.tr-check').forEach(function(c){c.checked=v;});
+function toggleAllTr(v){ document.querySelectorAll('.tr-check').forEach(function(c){ c.checked=v; }); }
+function selectUntranslated(){
+    document.querySelectorAll('.tr-check').forEach(function(c){
+        var row = document.getElementById('tr-status-' + c.value);
+        var txt = row ? row.textContent : '';
+        c.checked = txt.indexOf('tradotto') === -1 || txt.indexOf('errore') !== -1;
+    });
 }
-
 function startTranslation(){
     var checks = Array.from(document.querySelectorAll('.tr-check:checked'));
     if(!checks.length){ alert('Nessun prodotto selezionato.'); return; }
     _trStop = false;
-    document.getElementById('btn-tr-start').disabled=true;
-    document.getElementById('btn-tr-stop').style.display='';
-    document.getElementById('tr-progress').style.display='';
+    document.getElementById('btn-tr-start').disabled = true;
+    document.getElementById('btn-tr-stop').style.display = '';
+    document.getElementById('tr-progress').style.display = '';
     translateNext(checks, 0, checks.length);
 }
-
-function stopTranslation(){ _trStop=true; }
-
+function stopTranslation(){ _trStop = true; }
 function translateNext(checks, idx, total){
     if(_trStop || idx >= checks.length){
-        document.getElementById('btn-tr-start').disabled=false;
-        document.getElementById('btn-tr-stop').style.display='none';
-        document.getElementById('tr-info').textContent = _trStop ? 'Fermato.' : 'Completato!';
+        document.getElementById('btn-tr-start').disabled = false;
+        document.getElementById('btn-tr-stop').style.display = 'none';
+        document.getElementById('tr-info').textContent = _trStop ? 'Fermato.' : '✓ Completato!';
         return;
     }
-    var c   = checks[idx];
-    var idP = c.dataset.idp;
-    var idA = c.dataset.ida;
-    var key = c.value;
-    var pct = Math.round((idx/total)*100);
-    document.getElementById('tr-bar').style.width=pct+'%';
-    document.getElementById('tr-bar').textContent=pct+'%';
-    document.getElementById('tr-info').textContent='Traduzione '+(idx+1)+'/'+total+': prodotto #'+idP;
-    document.getElementById('tr-status-'+key).innerHTML='<span class="label label-info">in corso...</span>';
+    var c = checks[idx], idP = c.dataset.idp, idA = c.dataset.ida, key = c.value;
+    var pct = Math.round(idx/total*100);
+    document.getElementById('tr-bar').style.width = pct+'%';
+    document.getElementById('tr-bar').textContent = pct+'%';
+    document.getElementById('tr-info').textContent = 'Traduzione '+(idx+1)+'/'+total+': prodotto #'+idP;
+    document.getElementById('tr-status-'+key).innerHTML = '<span class="label label-info">⏳ in corso...</span>';
 
-    var url = _ajaxUrl + '&id_product='+idP+'&id_product_attribute='+idA;
-    fetch(url)
+    fetch(_trAjax + '&id_product='+idP+'&id_product_attribute='+idA)
         .then(function(r){ return r.json(); })
-        .then(function(data){
-            if(data.success){
-                document.getElementById('tr-status-'+key).innerHTML='<span class="label label-success">✓ tradotto</span>';
-                if(data.message){ document.getElementById('tr-fr-'+key).textContent=data.message.replace(/^Tradotto: /,''); }
+        .then(function(d){
+            if(d.success){
+                document.getElementById('tr-status-'+key).innerHTML = '<span class="label label-success">✓ tradotto</span>';
+                if(d.message && !d.skipped) document.getElementById('tr-fr-'+key).textContent = d.message;
             } else {
-                var err = data.message || 'Errore sconosciuto';
-                document.getElementById('tr-status-'+key).innerHTML='<span class="label label-danger" title="'+err+'">✗ errore</span><br><small class="text-danger">'+err+'</small>';
+                var err = d.message || 'Errore sconosciuto';
+                document.getElementById('tr-status-'+key).innerHTML =
+                    '<span class="label label-danger">✗ errore</span><br><small class="text-danger">'+err+'</small>';
             }
             translateNext(checks, idx+1, total);
         })
         .catch(function(e){
-            document.getElementById('tr-status-'+key).innerHTML='<span class="label label-danger">✗ fetch error</span><br><small class="text-danger">'+e.message+'</small>';
+            document.getElementById('tr-status-'+key).innerHTML =
+                '<span class="label label-danger">✗ errore rete</span><br><small class="text-danger">'+e.message+'</small>';
             translateNext(checks, idx+1, total);
         });
 }
@@ -869,18 +1085,19 @@ HTML;
 
     private function renderTabSync()
     {
-        $p        = _DB_PREFIX_;
-        $total    = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds2_product` WHERE enabled=1");
-        $synced   = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds2_product` WHERE enabled=1 AND cds_status='synced'");
-        $errors   = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds2_product` WHERE enabled=1 AND cds_status='error'");
-        $pending  = $total - $synced - $errors;
+        $p       = _DB_PREFIX_;
+        $idLang  = (int) $this->getItalianLangId();
+        $total   = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds2_product` WHERE enabled=1");
+        $synced  = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds2_product` WHERE enabled=1 AND cds_status='synced'");
+        $errors  = (int) Db::getInstance()->getValue("SELECT COUNT(*) FROM `{$p}cds2_product` WHERE enabled=1 AND cds_status='error'");
+        $pending = $total - $synced - $errors;
 
         $rows = Db::getInstance()->executeS(
             "SELECT cp.id_product, cp.id_product_attribute,
                     COALESCE(pl.name, CONCAT('Prodotto #', cp.id_product)) AS name,
                     cp.cds_status, cp.last_sync, cp.last_price, cp.last_stock, cp.last_error
              FROM `{$p}cds2_product` cp
-             LEFT JOIN `{$p}product_lang` pl ON pl.id_product=cp.id_product AND pl.id_lang=" . (int)$this->getItalianLangId() . "
+             LEFT JOIN `{$p}product_lang` pl ON pl.id_product=cp.id_product AND pl.id_lang={$idLang}
              WHERE cp.enabled=1
              ORDER BY cp.cds_status ASC, pl.name ASC"
         );
@@ -891,18 +1108,18 @@ HTML;
             $idP   = (int) $r['id_product'];
             $idA   = (int) $r['id_product_attribute'];
             $key   = $idP . '_' . $idA;
-            $name  = htmlspecialchars((string) $r['name'], ENT_QUOTES, 'UTF-8');
-            $err   = htmlspecialchars((string) $r['last_error'], ENT_QUOTES, 'UTF-8');
-            $sync  = $r['last_sync'] ? htmlspecialchars((string) $r['last_sync'], ENT_QUOTES, 'UTF-8') : '—';
+            $name  = htmlspecialchars((string)$r['name'], ENT_QUOTES, 'UTF-8');
+            $err   = htmlspecialchars((string)$r['last_error'], ENT_QUOTES, 'UTF-8');
+            $sync  = $r['last_sync'] ?: '—';
             $price = $r['last_price'] ? '€' . number_format((float)$r['last_price'], 2, ',', '.') : '—';
             $stock = $r['last_stock'] !== null ? (int)$r['last_stock'] : '—';
 
             switch ($r['cds_status']) {
                 case 'synced': $badge = '<span class="label label-success">✓ synced</span>'; break;
-                case 'error':  $badge = '<span class="label label-danger" title="'.$err.'">✗ errore</span>'; break;
+                case 'error':  $badge = '<span class="label label-danger" title="'.$err.'">✗ errore</span>'
+                                      . ($err ? '<br><small class="text-danger">'.$err.'</small>' : ''); break;
                 default:       $badge = '<span class="label label-warning">in attesa</span>';
             }
-            $errRow = $err ? "<br><small class='text-danger' style='max-width:300px;display:block;'>{$err}</small>" : '';
 
             $tableRows .= "<tr id='sy-row-{$key}'>
                 <td><input type='checkbox' class='sy-check' value='{$key}' data-idp='{$idP}' data-ida='{$idA}' checked></td>
@@ -910,7 +1127,7 @@ HTML;
                 <td id='sy-price-{$key}'>{$price}</td>
                 <td id='sy-stock-{$key}'>{$stock}</td>
                 <td>{$sync}</td>
-                <td id='sy-status-{$key}'>{$badge}{$errRow}</td>
+                <td id='sy-status-{$key}'>{$badge}</td>
             </tr>";
         }
 
@@ -924,29 +1141,24 @@ HTML;
 <div class="panel">
     <h3>🔄 Sincronizzazione Cdiscount</h3>
     <p>
-        <strong>Totale:</strong> {$total} &nbsp;|&nbsp;
-        <span class="text-success"><strong>Synced:</strong> {$synced}</span> &nbsp;|&nbsp;
-        <span class="text-danger"><strong>Errori:</strong> {$errors}</span> &nbsp;|&nbsp;
-        <strong>In attesa:</strong> {$pending}
+        Totale: <strong>{$total}</strong> &nbsp;|&nbsp;
+        <span class="text-success">Synced: <strong>{$synced}</strong></span> &nbsp;|&nbsp;
+        <span class="text-danger">Errori: <strong>{$errors}</strong></span> &nbsp;|&nbsp;
+        In attesa: <strong>{$pending}</strong>
     </p>
-    <div style="margin-bottom:12px;">
-        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllSy(true)">✅ Seleziona tutti</button>
-        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllSy(false)">⬜ Deseleziona tutti</button>
-        <button type="button" id="btn-sy-start" class="btn btn-primary" onclick="startSync()">
-            ▶ Sincronizza selezionati
-        </button>
-        <button type="button" id="btn-sy-stop" class="btn btn-danger" onclick="stopSync()" style="display:none;">
-            ⏹ Ferma
-        </button>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllSy(true)">✅ Tutti</button>
+        <button type="button" class="btn btn-default btn-sm" onclick="toggleAllSy(false)">⬜ Nessuno</button>
+        <button type="button" class="btn btn-default btn-sm" onclick="selectErrors()">🔁 Solo errori</button>
+        <button type="button" id="btn-sy-start" class="btn btn-primary" onclick="startSync()">▶ Sincronizza selezionati</button>
+        <button type="button" id="btn-sy-stop"  class="btn btn-danger"  onclick="stopSync()" style="display:none;">⏹ Ferma</button>
     </div>
     <div id="sy-progress" style="display:none;margin-bottom:10px;">
-        <div class="progress">
-            <div id="sy-bar" class="progress-bar progress-bar-striped active" role="progressbar" style="width:0%">0%</div>
-        </div>
+        <div class="progress"><div id="sy-bar" class="progress-bar progress-bar-striped active" style="width:0%">0%</div></div>
         <small id="sy-info"></small>
     </div>
     <div class="table-responsive">
-    <table class="table table-bordered table-striped table-hover" style="font-size:13px;">
+    <table class="table table-bordered table-hover" style="font-size:13px;">
         <thead>
             <tr>
                 <th style="width:30px;"><input type="checkbox" onchange="toggleAllSy(this.checked)"></th>
@@ -957,65 +1169,62 @@ HTML;
     </table>
     </div>
     <hr>
-    <h4>Cron automatico</h4>
-    <p>Aggiungi questo URL al cron di sistema per la sincronizzazione automatica ogni 30 minuti:</p>
+    <h4>⏱ Cron automatico</h4>
     <input type="text" class="form-control" value="{$cronUrl}" readonly onclick="this.select()" style="max-width:700px;">
-    <code style="display:block;margin-top:5px;">*/30 * * * * curl -s "{$cronUrl}" &gt; /dev/null</code>
+    <code style="display:block;margin-top:4px;">*/30 * * * * curl -s "{$cronUrl}" &gt; /dev/null</code>
 </div>
 <script>
 var _syStop = false;
-var _syAjaxUrl = {$ajaxUrl};
-
-function toggleAllSy(v){
-    document.querySelectorAll('.sy-check').forEach(function(c){c.checked=v;});
+var _syAjax = {$ajaxUrl};
+function toggleAllSy(v){ document.querySelectorAll('.sy-check').forEach(function(c){ c.checked=v; }); }
+function selectErrors(){
+    document.querySelectorAll('.sy-check').forEach(function(c){
+        var s = document.getElementById('sy-status-'+c.value);
+        c.checked = s ? s.textContent.indexOf('errore') !== -1 : false;
+    });
 }
-
 function startSync(){
     var checks = Array.from(document.querySelectorAll('.sy-check:checked'));
     if(!checks.length){ alert('Nessun prodotto selezionato.'); return; }
     _syStop = false;
-    document.getElementById('btn-sy-start').disabled=true;
-    document.getElementById('btn-sy-stop').style.display='';
-    document.getElementById('sy-progress').style.display='';
+    document.getElementById('btn-sy-start').disabled = true;
+    document.getElementById('btn-sy-stop').style.display = '';
+    document.getElementById('sy-progress').style.display = '';
     syncNext(checks, 0, checks.length);
 }
-
-function stopSync(){ _syStop=true; }
-
+function stopSync(){ _syStop = true; }
 function syncNext(checks, idx, total){
     if(_syStop || idx >= checks.length){
-        document.getElementById('btn-sy-start').disabled=false;
-        document.getElementById('btn-sy-stop').style.display='none';
-        document.getElementById('sy-info').textContent = _syStop ? 'Fermato.' : 'Completato!';
+        document.getElementById('btn-sy-start').disabled = false;
+        document.getElementById('btn-sy-stop').style.display = 'none';
+        document.getElementById('sy-info').textContent = _syStop ? 'Fermato.' : '✓ Completato!';
         document.getElementById('sy-bar').classList.remove('active');
         return;
     }
-    var c   = checks[idx];
-    var idP = c.dataset.idp;
-    var idA = c.dataset.ida;
-    var key = c.value;
-    var pct = Math.round((idx/total)*100);
-    document.getElementById('sy-bar').style.width=pct+'%';
-    document.getElementById('sy-bar').textContent=pct+'%';
-    document.getElementById('sy-info').textContent='Sync '+(idx+1)+'/'+total+': prodotto #'+idP;
-    document.getElementById('sy-status-'+key).innerHTML='<span class="label label-info">in corso...</span>';
+    var c = checks[idx], idP = c.dataset.idp, idA = c.dataset.ida, key = c.value;
+    var pct = Math.round(idx/total*100);
+    document.getElementById('sy-bar').style.width = pct+'%';
+    document.getElementById('sy-bar').textContent = pct+'%';
+    document.getElementById('sy-info').textContent = 'Sync '+(idx+1)+'/'+total+': prodotto #'+idP;
+    document.getElementById('sy-status-'+key).innerHTML = '<span class="label label-info">⏳ in corso...</span>';
 
-    var url = _syAjaxUrl + '&id_product='+idP+'&id_product_attribute='+idA;
-    fetch(url)
+    fetch(_syAjax + '&id_product='+idP+'&id_product_attribute='+idA)
         .then(function(r){ return r.json(); })
-        .then(function(data){
-            if(data.success){
-                document.getElementById('sy-status-'+key).innerHTML='<span class="label label-success">✓ synced</span>';
-                if(data.price) document.getElementById('sy-price-'+key).textContent='€'+parseFloat(data.price).toFixed(2).replace('.',',');
-                if(data.stock !== undefined) document.getElementById('sy-stock-'+key).textContent=data.stock;
+        .then(function(d){
+            if(d.success){
+                document.getElementById('sy-status-'+key).innerHTML = '<span class="label label-success">✓ synced</span>';
+                if(d.price) document.getElementById('sy-price-'+key).textContent = '€'+parseFloat(d.price).toFixed(2).replace('.',',');
+                if(d.stock !== undefined) document.getElementById('sy-stock-'+key).textContent = d.stock;
             } else {
-                var err = data.message || 'Errore sconosciuto';
-                document.getElementById('sy-status-'+key).innerHTML='<span class="label label-danger">✗ errore</span><br><small class="text-danger">'+err+'</small>';
+                var err = d.message || 'Errore sconosciuto';
+                document.getElementById('sy-status-'+key).innerHTML =
+                    '<span class="label label-danger">✗ errore</span><br><small class="text-danger">'+err+'</small>';
             }
             syncNext(checks, idx+1, total);
         })
         .catch(function(e){
-            document.getElementById('sy-status-'+key).innerHTML='<span class="label label-danger">✗ fetch error</span><br><small class="text-danger">'+e.message+'</small>';
+            document.getElementById('sy-status-'+key).innerHTML =
+                '<span class="label label-danger">✗ errore rete</span><br><small class="text-danger">'+e.message+'</small>';
             syncNext(checks, idx+1, total);
         });
 }
@@ -1041,10 +1250,12 @@ HTML;
 
         $orderRows = '';
         foreach ($recentOrders as $r) {
-            $cdsId   = htmlspecialchars((string) $r['cds_order_id'], ENT_QUOTES, 'UTF-8');
-            $psId    = $r['id_order'] ? '<a href="' . $this->context->link->getAdminLink('AdminOrders') . '&id_order=' . (int)$r['id_order'] . '">#' . (int)$r['id_order'] . '</a>' : '—';
-            $status  = htmlspecialchars((string) $r['status'], ENT_QUOTES, 'UTF-8');
-            $date    = htmlspecialchars((string) $r['imported_at'], ENT_QUOTES, 'UTF-8');
+            $cdsId = htmlspecialchars((string)$r['cds_order_id'], ENT_QUOTES, 'UTF-8');
+            $psId  = $r['id_order']
+                ? '<a href="' . $this->context->link->getAdminLink('AdminOrders') . '&id_order=' . (int)$r['id_order'] . '">#' . (int)$r['id_order'] . '</a>'
+                : '—';
+            $status = htmlspecialchars((string)$r['status'], ENT_QUOTES, 'UTF-8');
+            $date   = htmlspecialchars((string)$r['imported_at'], ENT_QUOTES, 'UTF-8');
             $orderRows .= "<tr><td>{$cdsId}</td><td>{$psId}</td><td>{$status}</td><td>{$date}</td></tr>";
         }
 
@@ -1054,42 +1265,37 @@ HTML;
 <div class="panel">
     <h3>📋 Ordini Cdiscount</h3>
     <p>Ordini importati: <strong>{$imported}</strong> &nbsp;|&nbsp; Ultima importazione: <strong>{$lastSync}</strong></p>
-    <button type="button" id="btn-import-orders" class="btn btn-primary" onclick="importOrders()">
+    <button type="button" id="btn-orders" class="btn btn-primary" onclick="importOrders()">
         ⬇️ Importa nuovi ordini ora
     </button>
-    <div id="order-result" style="margin-top:12px;"></div>
+    <div id="order-result" style="margin-top:10px;"></div>
 </div>
 <div class="panel">
     <h3>Ultimi 50 ordini importati</h3>
     <div class="table-responsive">
-    <table class="table table-bordered table-striped table-hover" style="font-size:13px;">
+    <table class="table table-bordered table-striped" style="font-size:13px;">
         <thead><tr><th>ID Cdiscount</th><th>Ordine PS</th><th>Stato</th><th>Importato il</th></tr></thead>
         <tbody>{$orderRows}</tbody>
     </table>
     </div>
 </div>
 <script>
-var _ordAjaxUrl = {$ajaxUrl};
+var _ordAjax = {$ajaxUrl};
 function importOrders(){
-    var btn = document.getElementById('btn-import-orders');
-    btn.disabled=true;
-    btn.textContent='⏳ Importazione in corso...';
-    document.getElementById('order-result').innerHTML='';
-    fetch(_ordAjaxUrl)
+    var btn = document.getElementById('btn-orders');
+    btn.disabled = true; btn.textContent = '⏳ Importazione...';
+    document.getElementById('order-result').innerHTML = '';
+    fetch(_ordAjax)
         .then(function(r){ return r.json(); })
-        .then(function(data){
-            btn.disabled=false;
-            btn.textContent='⬇️ Importa nuovi ordini ora';
-            if(data.success || data.imported !== undefined){
-                document.getElementById('order-result').innerHTML='<div class="alert alert-success">Importati: <strong>'+(data.imported||0)+'</strong> nuovi ordini.</div>';
-            } else {
-                document.getElementById('order-result').innerHTML='<div class="alert alert-danger">Errore: '+(data.message||'sconosciuto')+'</div>';
-            }
+        .then(function(d){
+            btn.disabled = false; btn.textContent = '⬇️ Importa nuovi ordini ora';
+            document.getElementById('order-result').innerHTML = d.success || d.imported !== undefined
+                ? '<div class="alert alert-success">Importati: <strong>'+(d.imported||0)+'</strong> nuovi ordini.</div>'
+                : '<div class="alert alert-danger">Errore: '+(d.message||'sconosciuto')+'</div>';
         })
         .catch(function(e){
-            btn.disabled=false;
-            btn.textContent='⬇️ Importa nuovi ordini ora';
-            document.getElementById('order-result').innerHTML='<div class="alert alert-danger">Errore di rete: '+e.message+'</div>';
+            btn.disabled = false; btn.textContent = '⬇️ Importa nuovi ordini ora';
+            document.getElementById('order-result').innerHTML = '<div class="alert alert-danger">Errore di rete: '+e.message+'</div>';
         });
 }
 </script>
@@ -1097,7 +1303,7 @@ HTML;
     }
 
     // =========================================================================
-    // API – TOKEN
+    // API – TOKEN OCTOPIA
     // =========================================================================
 
     private function getToken()
@@ -1107,8 +1313,7 @@ HTML;
         if (!$clientId || !$clientSecret) {
             throw new RuntimeException('Client ID o Client Secret non configurati.');
         }
-
-        $ch = curl_init('https://api.octopia.com/api/security/token');
+        $ch = curl_init(self::TOKEN_URL);
         curl_setopt_array($ch, [
             CURLOPT_POST           => true,
             CURLOPT_RETURNTRANSFER => true,
@@ -1123,11 +1328,10 @@ HTML;
         $body = curl_exec($ch);
         $err  = curl_error($ch);
         curl_close($ch);
-
-        if ($err) { throw new RuntimeException('cURL token: ' . $err); }
+        if ($err) { throw new RuntimeException('Token cURL: ' . $err); }
         $data = json_decode($body, true);
         if (empty($data['access_token'])) {
-            throw new RuntimeException('Token non ottenuto: ' . $body);
+            throw new RuntimeException('Token non ottenuto. Risposta: ' . substr($body, 0, 300));
         }
         return $data['access_token'];
     }
@@ -1135,30 +1339,30 @@ HTML;
     private function apiCall($method, $path, $payload = null, $token = null)
     {
         if (!$token) { $token = $this->getToken(); }
-        $url = 'https://api.octopia.com' . $path;
+        $sellerId = Configuration::get('CDS2_SELLER_ID');
+        $url      = self::API_BASE . $path;
 
         $ch = curl_init($url);
-        $opts = [
+        curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 30,
             CURLOPT_CUSTOMREQUEST  => strtoupper($method),
             CURLOPT_HTTPHEADER     => [
                 'Authorization: Bearer ' . $token,
+                'SellerId: ' . $sellerId,
                 'Content-Type: application/json',
                 'Accept: application/json',
             ],
-        ];
+        ]);
         if ($payload !== null) {
-            $opts[CURLOPT_POSTFIELDS] = json_encode($payload);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
         }
-        curl_setopt_array($ch, $opts);
-        $body    = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $err     = curl_error($ch);
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
         curl_close($ch);
-
-        if ($err) { throw new RuntimeException('cURL: ' . $err); }
-        return ['code' => $httpCode, 'body' => $body, 'data' => json_decode($body, true)];
+        if ($err) { throw new RuntimeException('API cURL: ' . $err); }
+        return ['code' => $code, 'body' => $body, 'data' => json_decode($body, true)];
     }
 
     // =========================================================================
@@ -1169,47 +1373,41 @@ HTML;
     {
         try {
             $token    = $this->getToken();
-            $sellerId = Configuration::get('CDS2_SELLER_ID');
             $idLang   = $this->getItalianLangId();
-
-            $product = new Product($idProduct, false, $idLang);
+            $product  = new Product($idProduct, false, $idLang);
             if (!Validate::isLoadedObject($product)) {
                 return ['success' => false, 'message' => 'Prodotto non trovato', 'price' => null, 'stock' => null];
             }
 
-            $price  = $idAttr
-                ? (float) Product::getPriceStatic($idProduct, true, $idAttr)
-                : (float) Product::getPriceStatic($idProduct, true);
-            $stock  = (int) StockAvailable::getQuantityAvailableByProduct($idProduct, $idAttr ?: 0);
-            $sku    = $idAttr ? $this->getAttributeSku($idProduct, $idAttr, $product->reference) : (string) $product->reference;
-            $ean    = $idAttr ? $this->getAttributeEan($idProduct, $idAttr, $product->ean13) : (string) $product->ean13;
+            $price    = (float) Product::getPriceStatic($idProduct, true, $idAttr ?: null);
+            $stock    = (int) StockAvailable::getQuantityAvailableByProduct($idProduct, $idAttr ?: 0);
+            $sku      = $idAttr ? $this->getAttributeSku($idProduct, $idAttr, $product->reference) : (string)$product->reference;
+            $ean      = $idAttr ? $this->getAttributeEan($idProduct, $idAttr, $product->ean13)     : (string)$product->ean13;
 
             if (!$sku) {
-                return ['success' => false, 'message' => 'SKU mancante', 'price' => null, 'stock' => null];
+                return ['success' => false, 'message' => 'SKU (reference) mancante sul prodotto', 'price' => null, 'stock' => null];
             }
 
-            $shipping  = $this->calcShipping((float) $product->weight);
-            $cdsPrice  = $this->calcCdsPrice($price, $shipping);
+            $shipping = $this->calcShipping((float)$product->weight);
+            $cdsPrice = $this->calcCdsPrice($price, $shipping);
 
-            // Step 1: create product catalog if not exists
             $catResult = $this->createCatalogProduct($product, $idProduct, $idAttr, $sku, $ean, $cdsPrice, $token);
             if (!$catResult['success'] && !$catResult['already_exists']) {
                 return ['success' => false, 'message' => 'Catalog: ' . $catResult['message'], 'price' => null, 'stock' => null];
             }
 
-            // Step 2: update offer (price + stock)
-            $offerPayload = [
-                'offers' => [[
+            $res = $this->apiCall('PUT', '/seller/v2/offers', [
+                'offerPackage' => [[
                     'sellerProductId' => $sku,
                     'price'           => $cdsPrice,
                     'stockQuantity'   => $stock,
                     'isActive'        => true,
                     'shippingPrice'   => 0,
                 ]],
-            ];
-            $res = $this->apiCall('PUT', '/v1/sellers/' . urlencode($sellerId) . '/offers', $offerPayload, $token);
+            ], $token);
+
             if ($res['code'] >= 400) {
-                return ['success' => false, 'message' => 'Offer PUT ' . $res['code'] . ': ' . $res['body'], 'price' => null, 'stock' => null];
+                return ['success' => false, 'message' => 'PUT offer HTTP ' . $res['code'] . ': ' . substr($res['body'], 0, 300), 'price' => null, 'stock' => null];
             }
 
             return ['success' => true, 'message' => 'OK', 'price' => $cdsPrice, 'stock' => $stock];
@@ -1221,56 +1419,81 @@ HTML;
 
     private function createCatalogProduct($product, $idProduct, $idAttr, $sku, $ean, $cdsPrice, $token)
     {
-        $p        = _DB_PREFIX_;
-        $sellerId = Configuration::get('CDS2_SELLER_ID');
-        $idLang   = $this->getItalianLangId();
-
-        // get FR translation
-        $trans = Db::getInstance()->getRow(
+        $p      = _DB_PREFIX_;
+        $trans  = Db::getInstance()->getRow(
             "SELECT title_fr, desc_short_fr, desc_fr FROM `{$p}cds2_translation`
              WHERE id_product={$idProduct} AND id_product_attribute={$idAttr} AND status='done'"
         );
-
         $titleFr = $trans ? (string)$trans['title_fr'] : (string)$product->name;
         $shortFr = $trans ? (string)$trans['desc_short_fr'] : '';
         $descFr  = $trans ? (string)$trans['desc_fr'] : '';
 
-        // category mapping
-        $catRef = '';
-        $catRow = Db::getInstance()->getRow(
+        $catRow  = Db::getInstance()->getRow(
             "SELECT cds_reference FROM `{$p}cds2_category_map` WHERE id_category=" . (int)$product->id_category_default
         );
-        if ($catRow) { $catRef = (string) $catRow['cds_reference']; }
+        $catRef  = $catRow ? (string)$catRow['cds_reference'] : '';
 
-        $images = $this->getProductImageUrls($idProduct);
+        $images  = $this->getProductImageUrls($idProduct);
 
-        $payload = [
-            'products' => [[
-                'sellerProductId' => $sku,
-                'ean'             => $ean ?: null,
-                'title'           => $titleFr,
-                'description'     => $descFr ?: $shortFr ?: $titleFr,
-                'shortDescription'=> $shortFr ?: null,
-                'brand'           => $product->manufacturer_name ?: 'Generique',
-                'categoryCode'    => $catRef ?: null,
-                'price'           => $cdsPrice,
-                'images'          => array_map(fn($u) => ['uri' => $u], $images),
-            ]],
-        ];
+        $payload = ['products' => [[
+            'sellerProductId'  => $sku,
+            'ean'              => $ean ?: null,
+            'title'            => $titleFr,
+            'description'      => $descFr ?: $shortFr ?: $titleFr,
+            'shortDescription' => $shortFr ?: null,
+            'brand'            => $product->manufacturer_name ?: 'Generique',
+            'categoryCode'     => $catRef ?: null,
+            'price'            => $cdsPrice,
+            'images'           => array_map(fn($u) => ['uri' => $u], $images),
+        ]]];
 
-        $res = $this->apiCall('POST', '/v1/sellers/' . urlencode($sellerId) . '/products', $payload, $token);
-
+        $res = $this->apiCall('POST', '/seller/v2/products', $payload, $token);
         if ($res['code'] === 409) {
             return ['success' => true, 'already_exists' => true, 'message' => 'Già esistente'];
         }
         if ($res['code'] >= 400) {
-            return ['success' => false, 'already_exists' => false, 'message' => 'POST ' . $res['code'] . ': ' . $res['body']];
+            return ['success' => false, 'already_exists' => false, 'message' => 'POST product HTTP ' . $res['code'] . ': ' . substr($res['body'], 0, 300)];
         }
         return ['success' => true, 'already_exists' => false, 'message' => 'Creato'];
     }
 
     // =========================================================================
-    // ORDERS IMPORT
+    // DOWNLOAD CATEGORIES
+    // =========================================================================
+
+    private function downloadCategories()
+    {
+        $token = $this->getToken();
+        $res   = $this->apiCall('GET', '/seller/v2/referential/categories', null, $token);
+        if ($res['code'] >= 400) {
+            return ['success' => false, 'message' => 'GET categories HTTP ' . $res['code'] . ': ' . substr($res['body'], 0, 300)];
+        }
+        $categories = $res['data']['categories'] ?? $res['data'] ?? [];
+        if (!is_array($categories)) {
+            return ['success' => false, 'message' => 'Risposta categorie non valida: ' . substr($res['body'], 0, 200)];
+        }
+        $p   = _DB_PREFIX_;
+        $cnt = 0;
+        foreach ($categories as $cat) {
+            $ref    = pSQL((string)($cat['code'] ?? $cat['reference'] ?? ''));
+            $label  = pSQL((string)($cat['label'] ?? $cat['name'] ?? ''));
+            $level  = (int)($cat['level'] ?? 0);
+            $active = isset($cat['isActive']) ? (int)(bool)$cat['isActive'] : 1;
+            $pRef   = pSQL((string)($cat['parentCode'] ?? $cat['parentReference'] ?? ''));
+            if (!$ref) { continue; }
+            Db::getInstance()->execute(
+                "INSERT INTO `{$p}cds2_category` (reference,label,level,is_active,parent_reference,updated_at)
+                 VALUES ('{$ref}','{$label}',{$level},{$active}," . ($pRef ? "'{$pRef}'" : 'NULL') . ",NOW())
+                 ON DUPLICATE KEY UPDATE label='{$label}',level={$level},is_active={$active},
+                 parent_reference=" . ($pRef ? "'{$pRef}'" : 'NULL') . ",updated_at=NOW()"
+            );
+            $cnt++;
+        }
+        return ['success' => true, 'count' => $cnt];
+    }
+
+    // =========================================================================
+    // IMPORT ORDERS
     // =========================================================================
 
     private function importCdiscountOrders()
@@ -1281,25 +1504,21 @@ HTML;
             $p        = _DB_PREFIX_;
             $imported = 0;
 
-            $res = $this->apiCall('GET', '/v1/sellers/' . urlencode($sellerId) . '/orders?status=new&pageSize=50', null, $token);
+            $res = $this->apiCall('GET', '/seller/v2/orders?status=new&pageSize=50', null, $token);
             if ($res['code'] >= 400) {
-                return ['success' => false, 'message' => 'GET orders ' . $res['code'] . ': ' . $res['body'], 'imported' => 0];
+                return ['success' => false, 'message' => 'GET orders HTTP ' . $res['code'] . ': ' . substr($res['body'], 0, 300), 'imported' => 0];
             }
-
             $orders = $res['data']['items'] ?? $res['data']['orders'] ?? [];
             if (!is_array($orders)) {
                 return ['success' => true, 'message' => 'Nessun ordine', 'imported' => 0];
             }
-
             foreach ($orders as $cdsOrder) {
                 $cdsId = (string)($cdsOrder['id'] ?? $cdsOrder['orderId'] ?? '');
                 if (!$cdsId) { continue; }
-
                 $exists = Db::getInstance()->getValue(
                     "SELECT id FROM `{$p}cds2_order` WHERE cds_order_id='" . pSQL($cdsId) . "'"
                 );
                 if ($exists) { continue; }
-
                 $psOrderId = $this->createPsOrder($cdsOrder);
                 Db::getInstance()->execute(
                     "INSERT INTO `{$p}cds2_order` (cds_order_id,id_order,status,raw,imported_at)
@@ -1308,7 +1527,6 @@ HTML;
                 );
                 $imported++;
             }
-
             Configuration::updateValue('CDS2_LAST_ORDER_SYNC', date('Y-m-d H:i:s'));
             return ['success' => true, 'imported' => $imported];
 
@@ -1324,7 +1542,6 @@ HTML;
             $firstName = (string)($cdsOrder['shippingAddress']['firstName'] ?? $cdsOrder['customer']['firstName'] ?? 'CDS');
             $lastName  = (string)($cdsOrder['shippingAddress']['lastName']  ?? $cdsOrder['customer']['lastName']  ?? 'Customer');
 
-            // find or create customer
             $customer = new Customer();
             $customer->getByEmail($email);
             if (!$customer->id) {
@@ -1333,14 +1550,13 @@ HTML;
                 $customer->lastname   = $lastName;
                 $customer->passwd     = Tools::encrypt(Tools::passwdGen());
                 $customer->is_guest   = 1;
-                $customer->id_default_group = (int) Configuration::get('PS_GUEST_GROUP');
+                $customer->id_default_group = (int)Configuration::get('PS_GUEST_GROUP');
                 $customer->add();
             }
             if (!$customer->id) { return null; }
 
-            // address
             $addr              = new Address();
-            $addr->id_customer = (int) $customer->id;
+            $addr->id_customer = (int)$customer->id;
             $addr->alias       = 'cdiscount';
             $addr->firstname   = $firstName;
             $addr->lastname    = $lastName;
@@ -1348,17 +1564,16 @@ HTML;
             $addr->postcode    = (string)($cdsOrder['shippingAddress']['zipCode'] ?? '00000');
             $addr->city        = (string)($cdsOrder['shippingAddress']['city'] ?? 'N/A');
             $addr->id_country  = Country::getByIso(strtoupper((string)($cdsOrder['shippingAddress']['country'] ?? 'FR')));
-            if (!$addr->id_country) { $addr->id_country = (int) Configuration::get('PS_COUNTRY_DEFAULT'); }
+            if (!$addr->id_country) { $addr->id_country = (int)Configuration::get('PS_COUNTRY_DEFAULT'); }
             $addr->add();
             if (!$addr->id) { return null; }
 
-            // cart
             $cart              = new Cart();
-            $cart->id_customer = (int) $customer->id;
-            $cart->id_address_delivery = (int) $addr->id;
-            $cart->id_address_invoice  = (int) $addr->id;
-            $cart->id_currency = (int) Currency::getIdByIsoCode('EUR') ?: (int) Configuration::get('PS_CURRENCY_DEFAULT');
-            $cart->id_lang     = (int) Configuration::get('PS_LANG_DEFAULT');
+            $cart->id_customer = (int)$customer->id;
+            $cart->id_address_delivery = (int)$addr->id;
+            $cart->id_address_invoice  = (int)$addr->id;
+            $cart->id_currency = (int)(Currency::getIdByIsoCode('EUR') ?: Configuration::get('PS_CURRENCY_DEFAULT'));
+            $cart->id_lang     = (int)Configuration::get('PS_LANG_DEFAULT');
             $cart->add();
             if (!$cart->id) { return null; }
 
@@ -1366,37 +1581,33 @@ HTML;
             foreach ($items as $item) {
                 $sku = (string)($item['sellerProductId'] ?? $item['sku'] ?? '');
                 if (!$sku) { continue; }
-                $idProduct = (int) Db::getInstance()->getValue(
+                $idP = (int)Db::getInstance()->getValue(
                     "SELECT id_product FROM `" . _DB_PREFIX_ . "product` WHERE reference='" . pSQL($sku) . "'"
                 );
-                if ($idProduct) {
-                    $cart->updateQty((int)($item['quantity'] ?? 1), $idProduct);
-                }
+                if ($idP) { $cart->updateQty((int)($item['quantity'] ?? 1), $idP); }
             }
 
-            $idCarrier = (int) Configuration::get('PS_CARRIER_DEFAULT');
-            $order     = new Order();
-            $order->id_customer    = (int) $customer->id;
-            $order->id_cart        = (int) $cart->id;
-            $order->id_address_delivery = (int) $addr->id;
-            $order->id_address_invoice  = (int) $addr->id;
+            $order = new Order();
+            $order->id_customer    = (int)$customer->id;
+            $order->id_cart        = (int)$cart->id;
+            $order->id_address_delivery = (int)$addr->id;
+            $order->id_address_invoice  = (int)$addr->id;
             $order->id_currency    = $cart->id_currency;
-            $order->id_carrier     = $idCarrier;
+            $order->id_carrier     = (int)Configuration::get('PS_CARRIER_DEFAULT');
             $order->id_lang        = $cart->id_lang;
-            $order->id_shop        = (int) $this->context->shop->id;
-            $order->id_shop_group  = (int) $this->context->shop->id_shop_group;
+            $order->id_shop        = (int)$this->context->shop->id;
+            $order->id_shop_group  = (int)$this->context->shop->id_shop_group;
             $order->payment        = 'Cdiscount';
             $order->module         = 'cdsync';
             $order->total_paid     = (float)($cdsOrder['orderPrice'] ?? $cart->getOrderTotal());
             $order->total_paid_real= $order->total_paid;
-            $order->total_products = (float) $cart->getOrderTotal(false, Cart::ONLY_PRODUCTS);
-            $order->total_products_wt = (float) $cart->getOrderTotal(true, Cart::ONLY_PRODUCTS);
-            $order->total_shipping = (float) $cart->getOrderTotal(true, Cart::ONLY_SHIPPING);
+            $order->total_products = (float)$cart->getOrderTotal(false, Cart::ONLY_PRODUCTS);
+            $order->total_products_wt = (float)$cart->getOrderTotal(true, Cart::ONLY_PRODUCTS);
+            $order->total_shipping = (float)$cart->getOrderTotal(true, Cart::ONLY_SHIPPING);
             $order->conversion_rate = 1.0;
-            $order->current_state  = (int) Configuration::get('PS_OS_PAYMENT');
+            $order->current_state  = (int)Configuration::get('PS_OS_PAYMENT');
             $order->secure_key     = md5(uniqid());
             $order->add();
-
             return $order->id ?: null;
 
         } catch (Throwable $e) {
@@ -1405,63 +1616,40 @@ HTML;
     }
 
     // =========================================================================
-    // CATEGORIES – DOWNLOAD
+    // TRANSLATION ENGINE
     // =========================================================================
 
-    private function downloadCategories()
+    /** @var string|null */
+    private $lastTranslateError = null;
+
+    private function translate($text)
     {
-        $token = $this->getToken();
-        $res   = $this->apiCall('GET', '/v1/referential/categories', null, $token);
-        if ($res['code'] >= 400) {
-            return ['success' => false, 'message' => 'GET categories ' . $res['code'] . ': ' . $res['body']];
+        $provider = Configuration::get('CDS2_AI_PROVIDER') ?: 'ollama';
+        if ($provider === 'gemini') {
+            return $this->geminiTranslate($text);
         }
-
-        $categories = $res['data']['categories'] ?? $res['data'] ?? [];
-        if (!is_array($categories)) {
-            return ['success' => false, 'message' => 'Risposta categorie non valida'];
-        }
-
-        $p   = _DB_PREFIX_;
-        $cnt = 0;
-        foreach ($categories as $cat) {
-            $ref   = pSQL((string)($cat['code'] ?? $cat['reference'] ?? ''));
-            $label = pSQL((string)($cat['label'] ?? $cat['name'] ?? ''));
-            $level = (int)($cat['level'] ?? 0);
-            $active= isset($cat['isActive']) ? (int)(bool)$cat['isActive'] : 1;
-            $parentRef = pSQL((string)($cat['parentCode'] ?? $cat['parentReference'] ?? ''));
-            if (!$ref) { continue; }
-            Db::getInstance()->execute(
-                "INSERT INTO `{$p}cds2_category` (reference,label,level,is_active,parent_reference,updated_at)
-                 VALUES ('{$ref}','{$label}',{$level},{$active}," . ($parentRef ? "'{$parentRef}'" : 'NULL') . ",NOW())
-                 ON DUPLICATE KEY UPDATE label='{$label}',level={$level},is_active={$active},parent_reference=" . ($parentRef ? "'{$parentRef}'" : 'NULL') . ",updated_at=NOW()"
-            );
-            $cnt++;
-        }
-        return ['success' => true, 'count' => $cnt];
+        return $this->ollamaTranslate($text);
     }
-
-    // =========================================================================
-    // HELPERS
-    // =========================================================================
 
     private function ollamaTranslate($text)
     {
-        $endpoint = rtrim((string) Configuration::get('CDS2_AI_ENDPOINT'), '/');
-        $model    = (string) Configuration::get('CDS2_AI_MODEL');
+        $endpoint = rtrim((string)Configuration::get('CDS2_AI_ENDPOINT'), '/');
+        $model    = (string)Configuration::get('CDS2_AI_MODEL');
         if (!$endpoint || !$model) {
+            $this->lastTranslateError = 'Endpoint o modello Ollama non configurati.';
             return null;
         }
+        // ensure correct path
+        $url = preg_replace('#/api/generate$#', '', $endpoint) . '/api/generate';
 
-        $prompt = "Traduci in francese il seguente testo di prodotto. Rispondi SOLO con la traduzione, senza spiegazioni:\n\n" . $text;
-
-        $ch = curl_init($endpoint . '/api/generate');
+        $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_POST           => true,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 120,
             CURLOPT_POSTFIELDS     => json_encode([
                 'model'  => $model,
-                'prompt' => $prompt,
+                'prompt' => "Traduci in francese questo testo di prodotto. Rispondi SOLO con la traduzione, senza spiegazioni:\n\n" . $text,
                 'stream' => false,
             ]),
             CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
@@ -1471,17 +1659,56 @@ HTML;
         $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        if ($err) { return null; }
-        if ($code < 200 || $code >= 300) { return null; }
+        if ($err) { $this->lastTranslateError = 'Ollama cURL: ' . $err; return null; }
+        if ($code < 200 || $code >= 300) { $this->lastTranslateError = "Ollama HTTP {$code}: " . substr($body, 0, 200); return null; }
 
-        $data = json_decode($body, true);
+        $data   = json_decode($body, true);
         $result = trim((string)($data['response'] ?? ''));
-        return $result !== '' ? $result : null;
+        if ($result === '') { $this->lastTranslateError = 'Ollama risposta vuota. Body: ' . substr($body, 0, 200); return null; }
+        $this->lastTranslateError = null;
+        return $result;
     }
+
+    private function geminiTranslate($text)
+    {
+        $key = (string)Configuration::get('CDS2_GEMINI_KEY');
+        if (!$key) { $this->lastTranslateError = 'Chiave API Gemini non configurata.'; return null; }
+
+        $url     = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' . urlencode($key);
+        $payload = ['contents' => [['parts' => [['text' =>
+            "Traduci in francese questo testo di prodotto. Rispondi SOLO con la traduzione:\n\n" . $text
+        ]]]]];
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_POSTFIELDS     => json_encode($payload),
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($err) { $this->lastTranslateError = 'Gemini cURL: ' . $err; return null; }
+        if ($code >= 400) { $this->lastTranslateError = "Gemini HTTP {$code}: " . substr($body, 0, 200); return null; }
+
+        $data   = json_decode($body, true);
+        $result = trim((string)($data['candidates'][0]['content']['parts'][0]['text'] ?? ''));
+        if ($result === '') { $this->lastTranslateError = 'Gemini risposta vuota. Body: ' . substr($body, 0, 200); return null; }
+        $this->lastTranslateError = null;
+        return $result;
+    }
+
+    // =========================================================================
+    // HELPERS
+    // =========================================================================
 
     private function calcCdsPrice($price, $shipping)
     {
-        $commission = (float) Configuration::get('CDS2_COMMISSION_RATE');
+        $commission = (float)Configuration::get('CDS2_COMMISSION_RATE');
         if ($commission >= 100 || $commission < 0) { $commission = 15; }
         return round(($price + $shipping) / (1 - $commission / 100), 2);
     }
@@ -1491,17 +1718,15 @@ HTML;
         $tiers = json_decode(Configuration::get('CDS2_SHIPPING_TIERS') ?: '[]', true) ?: [];
         usort($tiers, fn($a, $b) => $a['max_weight'] <=> $b['max_weight']);
         foreach ($tiers as $tier) {
-            if ($weightKg <= (float)$tier['max_weight']) {
-                return (float)$tier['price'];
-            }
+            if ($weightKg <= (float)$tier['max_weight']) { return (float)$tier['price']; }
         }
-        return isset($tiers[count($tiers) - 1]) ? (float)$tiers[count($tiers) - 1]['price'] : 9.99;
+        return !empty($tiers) ? (float)end($tiers)['price'] : 9.99;
     }
 
     private function getItalianLangId()
     {
         $id = Language::getIdByIso('it');
-        return $id ?: (int) Configuration::get('PS_LANG_DEFAULT');
+        return $id ?: (int)Configuration::get('PS_LANG_DEFAULT');
     }
 
     private function getAttributeSku($idProduct, $idAttr, $default = '')
@@ -1526,7 +1751,7 @@ HTML;
 
     private function getProductImageUrls($idProduct)
     {
-        $images = Image::getImages((int) $this->context->language->id, $idProduct);
+        $images = Image::getImages((int)$this->context->language->id, $idProduct);
         $urls   = [];
         foreach ($images as $img) {
             $urls[] = $this->context->link->getImageLink('', $img['id_image'], ImageType::getFormattedName('large'));
@@ -1536,7 +1761,6 @@ HTML;
 
     private function extractReference($input)
     {
-        // input can be "REF001 – Nom catégorie" or just "REF001"
         $parts = explode('–', $input);
         return trim($parts[0]);
     }
@@ -1548,8 +1772,8 @@ HTML;
     private function getProductRows($limit, $offset)
     {
         $p      = _DB_PREFIX_;
-        $idLang = (int) $this->getItalianLangId();
-        $idShop = (int) $this->context->shop->id;
+        $idLang = (int)$this->getItalianLangId();
+        $idShop = (int)$this->context->shop->id;
 
         $rows = Db::getInstance()->executeS(
             "SELECT p.id_product, 0 AS id_product_attribute,
@@ -1558,7 +1782,7 @@ HTML;
                     p.ean13 AS ean_product, '' AS ean_attr,
                     '' AS combo,
                     COALESCE(ps.price, p.price) AS price,
-                    sa.quantity,
+                    COALESCE(sa.quantity, 0) AS quantity,
                     COALESCE(cp.enabled, 0) AS enabled,
                     COALESCE(cp.cds_status, 'none') AS cds_status,
                     COALESCE(cp.last_error, '') AS last_error
@@ -1577,7 +1801,7 @@ HTML;
                     p.ean13 AS ean_product, pa.ean13 AS ean_attr,
                     GROUP_CONCAT(DISTINCT agl.name ORDER BY agl.name SEPARATOR ' / ') AS combo,
                     (COALESCE(ps.price, p.price) + pa.price) AS price,
-                    sa.quantity,
+                    COALESCE(sa.quantity, 0) AS quantity,
                     COALESCE(cp.enabled, 0) AS enabled,
                     COALESCE(cp.cds_status, 'none') AS cds_status,
                     COALESCE(cp.last_error, '') AS last_error
@@ -1601,14 +1825,11 @@ HTML;
     private function countAllProducts()
     {
         $p      = _DB_PREFIX_;
-        $idShop = (int) $this->context->shop->id;
-        $simple = (int) Db::getInstance()->getValue(
-            "SELECT COUNT(*) FROM `{$p}product` p
-             WHERE p.active=1 AND NOT EXISTS (
-                 SELECT 1 FROM `{$p}product_attribute` pa WHERE pa.id_product=p.id_product LIMIT 1
-             )"
+        $simple = (int)Db::getInstance()->getValue(
+            "SELECT COUNT(*) FROM `{$p}product` p WHERE p.active=1
+             AND NOT EXISTS (SELECT 1 FROM `{$p}product_attribute` pa WHERE pa.id_product=p.id_product LIMIT 1)"
         );
-        $variants = (int) Db::getInstance()->getValue(
+        $variants = (int)Db::getInstance()->getValue(
             "SELECT COUNT(*) FROM `{$p}product` p
              INNER JOIN `{$p}product_attribute` pa ON pa.id_product=p.id_product
              WHERE p.active=1"
@@ -1619,8 +1840,8 @@ HTML;
     private function getCategoryMapRows()
     {
         $p      = _DB_PREFIX_;
-        $idLang = (int) $this->getItalianLangId();
-        $idShop = (int) $this->context->shop->id;
+        $idLang = (int)$this->getItalianLangId();
+        $idShop = (int)$this->context->shop->id;
 
         $rows = Db::getInstance()->executeS(
             "SELECT DISTINCT p.id_category_default AS id_category,
@@ -1646,7 +1867,7 @@ HTML;
         if (!is_array($rows)) { return ''; }
         $html = '';
         foreach ($rows as $r) {
-            $val = htmlspecialchars($r['reference'] . ' – ' . $r['label'], ENT_QUOTES, 'UTF-8');
+            $val  = htmlspecialchars($r['reference'] . ' – ' . $r['label'], ENT_QUOTES, 'UTF-8');
             $html .= "<option value='{$val}'></option>";
         }
         return $html;
