@@ -265,23 +265,27 @@ class Cdsync extends Module
 
     private function postProducts()
     {
-        $p       = _DB_PREFIX_;
-        $enabled = Tools::getValue('enabled_products', []);
-        if (!is_array($enabled)) { $enabled = []; }
+        $p        = _DB_PREFIX_;
+        $enabled  = Tools::getValue('enabled_products', []);
+        $allPage  = Tools::getValue('page_products', []);   // tutti i prodotti visibili nella pagina
+        if (!is_array($enabled))  { $enabled  = []; }
+        if (!is_array($allPage))  { $allPage  = []; }
 
-        Db::getInstance()->execute("UPDATE `{$p}cds2_product` SET enabled=0");
-        foreach ($enabled as $key) {
-            $parts = explode('_', $key . '_0');
-            $idP   = (int) $parts[0];
-            $idA   = (int) $parts[1];
+        $enabledSet = array_flip($enabled);
+
+        foreach ($allPage as $key) {
+            $parts  = explode('_', $key . '_0');
+            $idP    = (int) $parts[0];
+            $idA    = (int) $parts[1];
+            $isOn   = isset($enabledSet[$key]) ? 1 : 0;
             Db::getInstance()->execute(
                 "INSERT INTO `{$p}cds2_product` (id_product,id_product_attribute,enabled)
-                 VALUES ({$idP},{$idA},1)
-                 ON DUPLICATE KEY UPDATE enabled=1"
+                 VALUES ({$idP},{$idA},{$isOn})
+                 ON DUPLICATE KEY UPDATE enabled={$isOn}"
             );
         }
         return $this->displayConfirmation(
-            sprintf($this->l('%d prodotti selezionati per la sincronizzazione.'), count($enabled))
+            sprintf($this->l('%d prodotti selezionati (su %d in questa pagina).'), count($enabled), count($allPage))
         );
     }
 
@@ -763,7 +767,30 @@ HTML;
         $total  = $this->countAllProducts();
         $pages  = max(1, (int) ceil($total / $limit));
 
-        $tableRows = '';
+        // build unique values for dropdown filters
+        $namesOpts  = '';
+        $skusOpts   = '';
+        $statusOpts = '<option value="">Tutti</option>'
+                    . '<option value="synced">synced</option>'
+                    . '<option value="error">errore</option>'
+                    . '<option value="none">in attesa</option>';
+
+        $namesSeen = $skusSeen = [];
+        foreach ($rows as $r) {
+            $nm = (string)$r['name'] . ($r['combo'] ? ' – ' . $r['combo'] : '');
+            if (!isset($namesSeen[$nm])) {
+                $namesSeen[$nm] = true;
+                $namesOpts .= '<option value="' . htmlspecialchars($nm, ENT_QUOTES, 'UTF-8') . '"></option>';
+            }
+            $sk = trim((string)($r['sku_attr'] ?: $r['sku_product']));
+            if ($sk && !isset($skusSeen[$sk])) {
+                $skusSeen[$sk] = true;
+                $skusOpts .= '<option value="' . htmlspecialchars($sk, ENT_QUOTES, 'UTF-8') . '"></option>';
+            }
+        }
+
+        $tableRows  = '';
+        $hiddenPage = '';
         foreach ($rows as $r) {
             $idP     = (int) $r['id_product'];
             $idA     = (int) $r['id_product_attribute'];
@@ -774,8 +801,9 @@ HTML;
             $price   = number_format((float)$r['price'], 2, ',', '.');
             $stock   = (int)$r['quantity'];
             $enabled = $r['enabled'] ? 'checked' : '';
+            $cdsStatus = (string)$r['cds_status'];
 
-            switch ($r['cds_status']) {
+            switch ($cdsStatus) {
                 case 'synced': $badge = '<span class="label label-success">synced</span>'; break;
                 case 'error':
                     $et = htmlspecialchars((string)$r['last_error'], ENT_QUOTES, 'UTF-8');
@@ -784,15 +812,24 @@ HTML;
                 default: $badge = $r['enabled'] ? '<span class="label label-warning">in attesa</span>' : '';
             }
 
-            $tableRows .= "<tr>
-                <td><input type='checkbox' name='enabled_products[]' value='{$key}' {$enabled} class='prod-chk'></td>
-                <td class='col-name'>{$name}</td>
-                <td class='col-sku'>{$sku}</td>
-                <td class='col-ean'>{$ean}</td>
-                <td class='col-price'>€{$price}</td>
-                <td class='col-stock'>{$stock}</td>
-                <td class='col-status'>{$badge}</td>
-            </tr>";
+            // data-* attributes for JS filtering
+            $tableRows .= "<tr data-name='" . htmlspecialchars((string)$r['name'] . ($r['combo'] ? ' – ' . $r['combo'] : ''), ENT_QUOTES, 'UTF-8') . "'"
+                        . " data-sku='" . htmlspecialchars(trim((string)($r['sku_attr'] ?: $r['sku_product'])), ENT_QUOTES, 'UTF-8') . "'"
+                        . " data-ean='" . htmlspecialchars(trim((string)($r['ean_attr'] ?: $r['ean_product'])), ENT_QUOTES, 'UTF-8') . "'"
+                        . " data-stock='{$stock}'"
+                        . " data-status='{$cdsStatus}'"
+                        . ">"
+                        . "<td><input type='checkbox' name='enabled_products[]' value='{$key}' {$enabled} class='prod-chk'></td>"
+                        . "<td class='col-name'>{$name}</td>"
+                        . "<td class='col-sku'>{$sku}</td>"
+                        . "<td class='col-ean'>{$ean}</td>"
+                        . "<td>€{$price}</td>"
+                        . "<td>{$stock}</td>"
+                        . "<td>{$badge}</td>"
+                        . "</tr>";
+
+            // hidden input to track ALL products on this page
+            $hiddenPage .= "<input type='hidden' name='page_products[]' value='{$key}'>";
         }
 
         // pagination
@@ -810,63 +847,90 @@ HTML;
         $enabledCount = (int) Db::getInstance()->getValue(
             'SELECT COUNT(*) FROM `' . _DB_PREFIX_ . 'cds2_product` WHERE enabled=1'
         );
+        $pageCount = count($rows);
 
         return <<<HTML
 <div class="panel">
-    <h3>📦 Prodotti ({$total} totali, {$enabledCount} selezionati per sync)</h3>
+    <h3>📦 Prodotti — Totale: {$total} &nbsp;|&nbsp; Selezionati per sync: <strong>{$enabledCount}</strong></h3>
+    <p style="font-size:12px;color:#888;">
+        Il salvataggio aggiorna solo i prodotti visibili nella pagina corrente ({$pageCount} righe).
+        I prodotti delle altre pagine mantengono la selezione precedente.
+    </p>
     <form method="post" action="{$action}" id="prod-form">
+        {$hiddenPage}
+
+        <!-- Pulsanti azione -->
         <div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(true)">✅ Tutti</button>
-            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(false)">⬜ Nessuno</button>
-            <button type="button" class="btn btn-default btn-sm" onclick="toggleEnabled()">🔄 Solo abilitati</button>
+            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(true)">✅ Seleziona visibili</button>
+            <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(false)">⬜ Deseleziona visibili</button>
+            <button type="button" class="btn btn-default btn-sm" onclick="resetToSaved()">↩ Ripristina salvato</button>
             <span style="flex:1;"></span>
+            <span id="sel-count" style="font-size:13px;color:#555;"></span>
             <button type="submit" name="submitCds2Products" value="1" class="btn btn-primary">💾 Salva selezione</button>
         </div>
 
-        <!-- Filtri colonne -->
-        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;">
-            <div><label style="font-size:11px;display:block;">🔍 Prodotto</label>
-                <input type="text" id="f-name" class="form-control input-sm" placeholder="Filtra nome..." oninput="filterTable()" style="width:220px;"></div>
-            <div><label style="font-size:11px;display:block;">SKU</label>
-                <input type="text" id="f-sku" class="form-control input-sm" placeholder="SKU..." oninput="filterTable()" style="width:120px;"></div>
-            <div><label style="font-size:11px;display:block;">EAN</label>
-                <input type="text" id="f-ean" class="form-control input-sm" placeholder="EAN..." oninput="filterTable()" style="width:140px;"></div>
-            <div><label style="font-size:11px;display:block;">Stock min</label>
-                <input type="number" id="f-stock" class="form-control input-sm" placeholder="es. 1" oninput="filterTable()" style="width:80px;"></div>
-            <div><label style="font-size:11px;display:block;">Stato CDS</label>
-                <select id="f-status" class="form-control input-sm" onchange="filterTable()" style="width:120px;">
-                    <option value="">Tutti</option>
-                    <option value="synced">synced</option>
-                    <option value="errore">errore</option>
-                    <option value="in attesa">in attesa</option>
-                </select>
-            </div>
-            <button type="button" class="btn btn-default btn-sm" onclick="clearFilters()">✕ Reset</button>
-        </div>
-
-        <div class="table-responsive">
-        <table class="table table-bordered table-striped table-hover" style="font-size:13px;" id="prod-table">
+        <!-- Filtri dropdown per colonna -->
+        <table class="table table-bordered table-condensed" style="font-size:12px;margin-bottom:0;">
             <thead>
-                <tr>
-                    <th style="width:30px;"><input type="checkbox" id="chk-all" onchange="toggleAll(this.checked)"></th>
-                    <th>Prodotto</th><th>SKU</th><th>EAN</th><th>Prezzo PS</th><th>Stock</th><th>Stato CDS</th>
+                <tr style="background:#f5f5f5;">
+                    <th style="width:36px;text-align:center;">
+                        <input type="checkbox" id="chk-all" title="Seleziona/deseleziona tutti i visibili" onchange="toggleAll(this.checked)">
+                    </th>
+                    <th>
+                        Prodotto<br>
+                        <input list="dl-names" type="text" id="f-name" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()" style="width:100%;margin-top:3px;">
+                        <datalist id="dl-names">{$namesOpts}</datalist>
+                    </th>
+                    <th style="width:110px;">
+                        SKU<br>
+                        <input list="dl-skus" type="text" id="f-sku" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()" style="width:100%;margin-top:3px;">
+                        <datalist id="dl-skus">{$skusOpts}</datalist>
+                    </th>
+                    <th style="width:140px;">
+                        EAN<br>
+                        <input type="text" id="f-ean" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()" style="width:100%;margin-top:3px;">
+                    </th>
+                    <th style="width:80px;">Prezzo PS</th>
+                    <th style="width:70px;">
+                        Stock<br>
+                        <input type="number" id="f-stock" class="form-control input-xs" placeholder="≥" oninput="filterTable()" style="width:60px;margin-top:3px;" min="0">
+                    </th>
+                    <th style="width:100px;">
+                        Stato CDS<br>
+                        <select id="f-status" class="form-control input-xs" onchange="filterTable()" style="width:100%;margin-top:3px;">
+                            {$statusOpts}
+                        </select>
+                    </th>
                 </tr>
             </thead>
-            <tbody>{$tableRows}</tbody>
+            <tbody id="prod-tbody">{$tableRows}</tbody>
         </table>
+
+        <div style="margin-top:6px;margin-bottom:4px;">
+            <button type="button" class="btn btn-default btn-xs" onclick="clearFilters()">✕ Reset filtri</button>
+            <span id="filter-count" style="font-size:12px;color:#888;margin-left:10px;"></span>
         </div>
-        <div id="filter-count" style="font-size:12px;color:#888;margin-bottom:6px;"></div>
+
         {$paging}
         <button type="submit" name="submitCds2Products" value="1" class="btn btn-primary">💾 Salva selezione</button>
     </form>
 </div>
 <script>
+function visibleChecks(){ return Array.from(document.querySelectorAll('#prod-tbody tr:not([style*="none"]) .prod-chk')); }
+function allChecks()    { return Array.from(document.querySelectorAll('#prod-tbody .prod-chk')); }
+
 function toggleAll(v){
-    document.querySelectorAll('.prod-chk').forEach(function(c){ if(c.closest('tr').style.display!=='none') c.checked=v; });
-    var ca=document.getElementById('chk-all'); if(ca) ca.checked=v;
+    visibleChecks().forEach(function(c){ c.checked = v; });
+    updateCount();
 }
-function toggleEnabled(){
-    document.querySelectorAll('.prod-chk').forEach(function(c){ c.checked=c.defaultChecked; });
+function resetToSaved(){
+    allChecks().forEach(function(c){ c.checked = c.defaultChecked; });
+    filterTable();
+}
+function updateCount(){
+    var n = visibleChecks().filter(function(c){ return c.checked; }).length;
+    var t = visibleChecks().length;
+    document.getElementById('sel-count').textContent = n + ' / ' + t + ' selezionati (visibili)';
 }
 function clearFilters(){
     ['f-name','f-sku','f-ean','f-stock'].forEach(function(id){ document.getElementById(id).value=''; });
@@ -874,34 +938,41 @@ function clearFilters(){
     filterTable();
 }
 function filterTable(){
-    var fName   = document.getElementById('f-name').value.toLowerCase();
-    var fSku    = document.getElementById('f-sku').value.toLowerCase();
-    var fEan    = document.getElementById('f-ean').value.toLowerCase();
-    var fStock  = parseInt(document.getElementById('f-stock').value) || 0;
-    var fStatus = document.getElementById('f-status').value.toLowerCase();
+    var fName   = document.getElementById('f-name').value.toLowerCase().trim();
+    var fSku    = document.getElementById('f-sku').value.toLowerCase().trim();
+    var fEan    = document.getElementById('f-ean').value.toLowerCase().trim();
+    var fStock  = parseInt(document.getElementById('f-stock').value);
+    var fStatus = document.getElementById('f-status').value;
 
-    var rows    = document.querySelectorAll('#prod-table tbody tr');
+    var rows = document.querySelectorAll('#prod-tbody tr');
     var visible = 0;
     rows.forEach(function(tr){
-        var name   = (tr.querySelector('.col-name')   || {}).textContent || '';
-        var sku    = (tr.querySelector('.col-sku')    || {}).textContent || '';
-        var ean    = (tr.querySelector('.col-ean')    || {}).textContent || '';
-        var stock  = parseInt((tr.querySelector('.col-stock')  || {}).textContent) || 0;
-        var status = (tr.querySelector('.col-status') || {}).textContent || '';
-
-        var show = (!fName   || name.toLowerCase().includes(fName))
-                && (!fSku    || sku.toLowerCase().includes(fSku))
-                && (!fEan    || ean.toLowerCase().includes(fEan))
-                && (!fStock  || stock >= fStock)
-                && (!fStatus || status.toLowerCase().includes(fStatus));
+        var show = true;
+        if(fName   && !tr.dataset.name.toLowerCase().includes(fName))   show = false;
+        if(fSku    && !tr.dataset.sku.toLowerCase().includes(fSku))     show = false;
+        if(fEan    && !tr.dataset.ean.toLowerCase().includes(fEan))     show = false;
+        if(!isNaN(fStock) && fStock > 0 && parseInt(tr.dataset.stock) < fStock) show = false;
+        if(fStatus && tr.dataset.status !== fStatus)                     show = false;
 
         tr.style.display = show ? '' : 'none';
         if(show) visible++;
     });
-    document.getElementById('filter-count').textContent = visible < rows.length
-        ? ('Mostrati ' + visible + ' di ' + rows.length + ' prodotti in questa pagina')
-        : '';
+    var total = rows.length;
+    document.getElementById('filter-count').textContent =
+        visible < total ? ('Mostrati ' + visible + ' di ' + total) : (total + ' prodotti');
+    // sync master checkbox
+    var vc = visibleChecks();
+    var allOn = vc.length > 0 && vc.every(function(c){ return c.checked; });
+    document.getElementById('chk-all').checked = allOn;
+    document.getElementById('chk-all').indeterminate = !allOn && vc.some(function(c){ return c.checked; });
+    updateCount();
 }
+
+// init
+document.querySelectorAll('.prod-chk').forEach(function(c){
+    c.addEventListener('change', updateCount);
+});
+filterTable();
 </script>
 HTML;
     }
