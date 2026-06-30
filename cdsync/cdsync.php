@@ -767,68 +767,125 @@ HTML;
         $total  = $this->countAllProducts();
         $pages  = max(1, (int) ceil($total / $limit));
 
-        // build unique values for dropdown filters
-        $namesOpts  = '';
-        $skusOpts   = '';
-        $statusOpts = '<option value="">Tutti</option>'
-                    . '<option value="synced">synced</option>'
-                    . '<option value="error">errore</option>'
-                    . '<option value="none">in attesa</option>';
+        // build datalist options
+        $namesOpts = $skusOpts = $brandOpts = $supplierOpts = $catOpts = '';
+        $cdsStatusOpts = '<option value="">Tutti</option>'
+                       . '<option value="synced">synced</option>'
+                       . '<option value="error">errore</option>'
+                       . '<option value="none">in attesa</option>';
+        $trOpts = '<option value="">Tutti</option>'
+                . '<option value="done">Tradotto</option>'
+                . '<option value="none">Da tradurre</option>'
+                . '<option value="error">Errore</option>';
+        $dataOpts = '<option value="">Tutti</option>'
+                  . '<option value="ok">OK</option>'
+                  . '<option value="warn">Attenzione</option>';
 
-        $namesSeen = $skusSeen = [];
+        $seen = [];
         foreach ($rows as $r) {
             $nm = (string)$r['name'] . ($r['combo'] ? ' – ' . $r['combo'] : '');
-            if (!isset($namesSeen[$nm])) {
-                $namesSeen[$nm] = true;
-                $namesOpts .= '<option value="' . htmlspecialchars($nm, ENT_QUOTES, 'UTF-8') . '"></option>';
-            }
+            if (!isset($seen['n'][$nm])) { $seen['n'][$nm]=1; $namesOpts .= '<option value="'.htmlspecialchars($nm,ENT_QUOTES,'UTF-8').'"></option>'; }
             $sk = trim((string)($r['sku_attr'] ?: $r['sku_product']));
-            if ($sk && !isset($skusSeen[$sk])) {
-                $skusSeen[$sk] = true;
-                $skusOpts .= '<option value="' . htmlspecialchars($sk, ENT_QUOTES, 'UTF-8') . '"></option>';
-            }
+            if ($sk && !isset($seen['s'][$sk])) { $seen['s'][$sk]=1; $skusOpts .= '<option value="'.htmlspecialchars($sk,ENT_QUOTES,'UTF-8').'"></option>'; }
+            $br = (string)$r['manufacturer'];
+            if ($br && !isset($seen['b'][$br])) { $seen['b'][$br]=1; $brandOpts .= '<option value="'.htmlspecialchars($br,ENT_QUOTES,'UTF-8').'"></option>'; }
+            $su = (string)$r['supplier'];
+            if ($su && !isset($seen['u'][$su])) { $seen['u'][$su]=1; $supplierOpts .= '<option value="'.htmlspecialchars($su,ENT_QUOTES,'UTF-8').'"></option>'; }
+            $ct = (string)$r['category'];
+            if ($ct && !isset($seen['c'][$ct])) { $seen['c'][$ct]=1; $catOpts .= '<option value="'.htmlspecialchars($ct,ENT_QUOTES,'UTF-8').'"></option>'; }
         }
 
         $tableRows  = '';
         $hiddenPage = '';
         foreach ($rows as $r) {
-            $idP     = (int) $r['id_product'];
-            $idA     = (int) $r['id_product_attribute'];
-            $key     = $idP . '_' . $idA;
-            $sku     = htmlspecialchars(trim((string)($r['sku_attr'] ?: $r['sku_product'])), ENT_QUOTES, 'UTF-8');
-            $ean     = htmlspecialchars(trim((string)($r['ean_attr'] ?: $r['ean_product'])), ENT_QUOTES, 'UTF-8');
-            $name    = htmlspecialchars((string)$r['name'] . ($r['combo'] ? ' – ' . $r['combo'] : ''), ENT_QUOTES, 'UTF-8');
-            $price   = number_format((float)$r['price'], 2, ',', '.');
+            $idP  = (int)$r['id_product'];
+            $idA  = (int)$r['id_product_attribute'];
+            $key  = $idP . '_' . $idA;
+            $sku  = htmlspecialchars(trim((string)($r['sku_attr'] ?: $r['sku_product'])), ENT_QUOTES, 'UTF-8');
+            $ean  = htmlspecialchars(trim((string)($r['ean_attr'] ?: $r['ean_product'])), ENT_QUOTES, 'UTF-8');
+            $prod = htmlspecialchars((string)$r['name'], ENT_QUOTES, 'UTF-8');
+            $var  = htmlspecialchars((string)$r['combo'], ENT_QUOTES, 'UTF-8');
+            $cat  = htmlspecialchars((string)$r['category'], ENT_QUOTES, 'UTF-8');
+            $brand   = htmlspecialchars((string)$r['manufacturer'], ENT_QUOTES, 'UTF-8');
+            $supplier = htmlspecialchars((string)$r['supplier'], ENT_QUOTES, 'UTF-8');
+            $weight  = (float)$r['weight'];
             $stock   = (int)$r['quantity'];
-            $enabled = $r['enabled'] ? 'checked' : '';
+            $pricePs = (float)$r['price'];
+            $shipping = $this->calcShipping($weight);
+            $priceCds = $this->calcCdsPrice($pricePs, $shipping);
+            $enabled  = $r['enabled'] ? 'checked' : '';
             $cdsStatus = (string)$r['cds_status'];
+            $trStatus  = (string)$r['tr_status'];
+            $active    = (int)$r['active'];
 
+            // Stato CDS badge
             switch ($cdsStatus) {
-                case 'synced': $badge = '<span class="label label-success">synced</span>'; break;
+                case 'synced': $cdsBadge = '<span class="label label-success">synced</span>'; break;
                 case 'error':
                     $et = htmlspecialchars((string)$r['last_error'], ENT_QUOTES, 'UTF-8');
-                    $badge = "<span class='label label-danger' title='{$et}'>errore</span>";
+                    $cdsBadge = "<span class='label label-danger' title='{$et}'>errore</span>";
                     break;
-                default: $badge = $r['enabled'] ? '<span class="label label-warning">in attesa</span>' : '';
+                default: $cdsBadge = $r['enabled'] ? '<span class="label label-warning">in attesa</span>' : '<span class="label label-default">-</span>';
             }
 
-            // data-* attributes for JS filtering
-            $tableRows .= "<tr data-name='" . htmlspecialchars((string)$r['name'] . ($r['combo'] ? ' – ' . $r['combo'] : ''), ENT_QUOTES, 'UTF-8') . "'"
-                        . " data-sku='" . htmlspecialchars(trim((string)($r['sku_attr'] ?: $r['sku_product'])), ENT_QUOTES, 'UTF-8') . "'"
-                        . " data-ean='" . htmlspecialchars(trim((string)($r['ean_attr'] ?: $r['ean_product'])), ENT_QUOTES, 'UTF-8') . "'"
-                        . " data-stock='{$stock}'"
-                        . " data-status='{$cdsStatus}'"
-                        . ">"
-                        . "<td><input type='checkbox' name='enabled_products[]' value='{$key}' {$enabled} class='prod-chk'></td>"
-                        . "<td class='col-name'>{$name}</td>"
-                        . "<td class='col-sku'>{$sku}</td>"
-                        . "<td class='col-ean'>{$ean}</td>"
-                        . "<td>€{$price}</td>"
-                        . "<td>{$stock}</td>"
-                        . "<td>{$badge}</td>"
-                        . "</tr>";
+            // Traduzione FR badge
+            switch ($trStatus) {
+                case 'done':  $trBadge = '<span class="label label-success">Tradotto</span>'; $trVal = 'done'; break;
+                case 'error': $trBadge = '<span class="label label-danger">Errore</span>';    $trVal = 'error'; break;
+                default:      $trBadge = '<span class="label label-default">Da tradurre</span>'; $trVal = 'none';
+            }
 
-            // hidden input to track ALL products on this page
+            // Stato Dati
+            $dataIssues = [];
+            if (!$ean)        $dataIssues[] = 'Manca EAN13';
+            if ($weight <= 0) $dataIssues[] = 'Peso mancante';
+            if (empty($dataIssues)) {
+                $dataBadge = '<span class="label label-success">OK</span>';
+                $dataVal   = 'ok';
+            } else {
+                $tip = htmlspecialchars(implode(', ', $dataIssues), ENT_QUOTES, 'UTF-8');
+                $dataBadge = "<span class='label label-warning' title='{$tip}'>⚠ " . count($dataIssues) . "</span>";
+                $dataVal   = 'warn';
+            }
+
+            // Attivo badge
+            $activeBadge = $active ? '<span class="label label-success">Sì</span>' : '<span class="label label-default">No</span>';
+
+            $fullName = $prod . ($var ? ' – ' . $var : '');
+
+            $tableRows .= "<tr"
+                . " data-name='" . htmlspecialchars($fullName, ENT_QUOTES, 'UTF-8') . "'"
+                . " data-sku='" . $sku . "'"
+                . " data-ean='" . $ean . "'"
+                . " data-brand='" . $brand . "'"
+                . " data-supplier='" . $supplier . "'"
+                . " data-cat='" . $cat . "'"
+                . " data-stock='{$stock}'"
+                . " data-status='{$cdsStatus}'"
+                . " data-tr='{$trVal}'"
+                . " data-data='{$dataVal}'"
+                . ">"
+                . "<td style='text-align:center;'><input type='checkbox' name='enabled_products[]' value='{$key}' {$enabled} class='prod-chk'></td>"
+                . "<td style='white-space:nowrap;'>{$idP}</td>"
+                . "<td style='white-space:nowrap;'>" . ($idA > 0 ? $idA : '-') . "</td>"
+                . "<td style='min-width:160px;'>{$prod}</td>"
+                . "<td style='min-width:100px;'>{$var}</td>"
+                . "<td style='min-width:100px;'>{$cat}</td>"
+                . "<td style='white-space:nowrap;'>{$brand}</td>"
+                . "<td style='white-space:nowrap;'>{$supplier}</td>"
+                . "<td style='white-space:nowrap;'>{$sku}</td>"
+                . "<td style='white-space:nowrap;'>{$ean}</td>"
+                . "<td style='white-space:nowrap;'>" . number_format($weight, 3, ',', '.') . " kg</td>"
+                . "<td style='white-space:nowrap;text-align:right;'>{$stock}</td>"
+                . "<td style='white-space:nowrap;text-align:right;'>€" . number_format($pricePs, 2, ',', '.') . "</td>"
+                . "<td style='white-space:nowrap;text-align:right;'>€" . number_format($shipping, 2, ',', '.') . "</td>"
+                . "<td style='white-space:nowrap;text-align:right;'>€" . number_format($priceCds, 2, ',', '.') . "</td>"
+                . "<td style='text-align:center;'>{$activeBadge}</td>"
+                . "<td style='text-align:center;'>{$trBadge}</td>"
+                . "<td style='text-align:center;'>{$cdsBadge}</td>"
+                . "<td style='text-align:center;'>{$dataBadge}</td>"
+                . "</tr>";
+
             $hiddenPage .= "<input type='hidden' name='page_products[]' value='{$key}'>";
         }
 
@@ -859,7 +916,6 @@ HTML;
     <form method="post" action="{$action}" id="prod-form">
         {$hiddenPage}
 
-        <!-- Pulsanti azione -->
         <div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
             <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(true)">✅ Seleziona visibili</button>
             <button type="button" class="btn btn-default btn-sm" onclick="toggleAll(false)">⬜ Deseleziona visibili</button>
@@ -869,42 +925,84 @@ HTML;
             <button type="submit" name="submitCds2Products" value="1" class="btn btn-primary">💾 Salva selezione</button>
         </div>
 
-        <!-- Filtri dropdown per colonna -->
-        <table class="table table-bordered table-condensed" style="font-size:12px;margin-bottom:0;">
+        <div class="table-responsive" style="overflow-x:auto;">
+        <table class="table table-bordered table-condensed table-hover" style="font-size:11px;margin-bottom:0;white-space:nowrap;">
             <thead>
-                <tr style="background:#f5f5f5;">
+                <tr style="background:#e8e8e8;font-weight:bold;">
                     <th style="width:36px;text-align:center;">
                         <input type="checkbox" id="chk-all" title="Seleziona/deseleziona tutti i visibili" onchange="toggleAll(this.checked)">
                     </th>
+                    <th>ID Prod.</th>
+                    <th>ID Var.</th>
+                    <th style="min-width:160px;">Prodotto</th>
+                    <th style="min-width:100px;">Variante</th>
+                    <th style="min-width:100px;">Categoria</th>
+                    <th>Marca</th>
+                    <th>Fornitore</th>
+                    <th>SKU</th>
+                    <th>EAN13</th>
+                    <th>Peso</th>
+                    <th>Stock</th>
+                    <th>Prezzo PS</th>
+                    <th>Sped.</th>
+                    <th>Prezzo CDS</th>
+                    <th>Attivo</th>
+                    <th>Traduzione FR</th>
+                    <th>Stato Cdiscount</th>
+                    <th>Stato Dati</th>
+                </tr>
+                <tr style="background:#f5f5f5;">
+                    <th></th>
+                    <th><input type="text" id="f-idp" class="form-control input-xs" placeholder="ID" oninput="filterTable()" style="width:50px;"></th>
+                    <th><input type="text" id="f-ida" class="form-control input-xs" placeholder="ID" oninput="filterTable()" style="width:50px;"></th>
                     <th>
-                        Prodotto<br>
-                        <input list="dl-names" type="text" id="f-name" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()" style="width:100%;margin-top:3px;">
+                        <input list="dl-names" type="text" id="f-name" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()">
                         <datalist id="dl-names">{$namesOpts}</datalist>
                     </th>
-                    <th style="width:110px;">
-                        SKU<br>
-                        <input list="dl-skus" type="text" id="f-sku" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()" style="width:100%;margin-top:3px;">
+                    <th></th>
+                    <th>
+                        <input list="dl-cats" type="text" id="f-cat" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()">
+                        <datalist id="dl-cats">{$catOpts}</datalist>
+                    </th>
+                    <th>
+                        <input list="dl-brands" type="text" id="f-brand" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()">
+                        <datalist id="dl-brands">{$brandOpts}</datalist>
+                    </th>
+                    <th>
+                        <input list="dl-suppliers" type="text" id="f-supplier" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()">
+                        <datalist id="dl-suppliers">{$supplierOpts}</datalist>
+                    </th>
+                    <th>
+                        <input list="dl-skus" type="text" id="f-sku" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()">
                         <datalist id="dl-skus">{$skusOpts}</datalist>
                     </th>
-                    <th style="width:140px;">
-                        EAN<br>
-                        <input type="text" id="f-ean" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()" style="width:100%;margin-top:3px;">
+                    <th><input type="text" id="f-ean" class="form-control input-xs" placeholder="🔍 filtra..." oninput="filterTable()"></th>
+                    <th></th>
+                    <th><input type="number" id="f-stock" class="form-control input-xs" placeholder="≥" oninput="filterTable()" style="width:55px;" min="0"></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th>
+                        <select id="f-tr" class="form-control input-xs" onchange="filterTable()">
+                            {$trOpts}
+                        </select>
                     </th>
-                    <th style="width:80px;">Prezzo PS</th>
-                    <th style="width:70px;">
-                        Stock<br>
-                        <input type="number" id="f-stock" class="form-control input-xs" placeholder="≥" oninput="filterTable()" style="width:60px;margin-top:3px;" min="0">
+                    <th>
+                        <select id="f-status" class="form-control input-xs" onchange="filterTable()">
+                            {$cdsStatusOpts}
+                        </select>
                     </th>
-                    <th style="width:100px;">
-                        Stato CDS<br>
-                        <select id="f-status" class="form-control input-xs" onchange="filterTable()" style="width:100%;margin-top:3px;">
-                            {$statusOpts}
+                    <th>
+                        <select id="f-data" class="form-control input-xs" onchange="filterTable()">
+                            {$dataOpts}
                         </select>
                     </th>
                 </tr>
             </thead>
             <tbody id="prod-tbody">{$tableRows}</tbody>
         </table>
+        </div>
 
         <div style="margin-top:6px;margin-bottom:4px;">
             <button type="button" class="btn btn-default btn-xs" onclick="clearFilters()">✕ Reset filtri</button>
@@ -933,26 +1031,47 @@ function updateCount(){
     document.getElementById('sel-count').textContent = n + ' / ' + t + ' selezionati (visibili)';
 }
 function clearFilters(){
-    ['f-name','f-sku','f-ean','f-stock'].forEach(function(id){ document.getElementById(id).value=''; });
-    document.getElementById('f-status').value='';
+    ['f-idp','f-ida','f-name','f-cat','f-brand','f-supplier','f-sku','f-ean','f-stock'].forEach(function(id){
+        var el = document.getElementById(id); if(el) el.value='';
+    });
+    ['f-tr','f-status','f-data'].forEach(function(id){
+        var el = document.getElementById(id); if(el) el.value='';
+    });
     filterTable();
 }
 function filterTable(){
-    var fName   = document.getElementById('f-name').value.toLowerCase().trim();
-    var fSku    = document.getElementById('f-sku').value.toLowerCase().trim();
-    var fEan    = document.getElementById('f-ean').value.toLowerCase().trim();
-    var fStock  = parseInt(document.getElementById('f-stock').value);
-    var fStatus = document.getElementById('f-status').value;
+    var fIdp      = document.getElementById('f-idp').value.trim();
+    var fIda      = document.getElementById('f-ida').value.trim();
+    var fName     = document.getElementById('f-name').value.toLowerCase().trim();
+    var fCat      = document.getElementById('f-cat').value.toLowerCase().trim();
+    var fBrand    = document.getElementById('f-brand').value.toLowerCase().trim();
+    var fSupplier = document.getElementById('f-supplier').value.toLowerCase().trim();
+    var fSku      = document.getElementById('f-sku').value.toLowerCase().trim();
+    var fEan      = document.getElementById('f-ean').value.toLowerCase().trim();
+    var fStock    = parseInt(document.getElementById('f-stock').value);
+    var fTr       = document.getElementById('f-tr').value;
+    var fStatus   = document.getElementById('f-status').value;
+    var fData     = document.getElementById('f-data').value;
 
     var rows = document.querySelectorAll('#prod-tbody tr');
     var visible = 0;
     rows.forEach(function(tr){
+        var cells = tr.querySelectorAll('td');
+        var idp = cells[1] ? cells[1].textContent.trim() : '';
+        var ida = cells[2] ? cells[2].textContent.trim() : '';
         var show = true;
-        if(fName   && !tr.dataset.name.toLowerCase().includes(fName))   show = false;
-        if(fSku    && !tr.dataset.sku.toLowerCase().includes(fSku))     show = false;
-        if(fEan    && !tr.dataset.ean.toLowerCase().includes(fEan))     show = false;
+        if(fIdp      && idp !== fIdp)                                           show = false;
+        if(fIda      && ida !== fIda)                                           show = false;
+        if(fName     && !tr.dataset.name.toLowerCase().includes(fName))         show = false;
+        if(fCat      && !tr.dataset.cat.toLowerCase().includes(fCat))           show = false;
+        if(fBrand    && !tr.dataset.brand.toLowerCase().includes(fBrand))       show = false;
+        if(fSupplier && !tr.dataset.supplier.toLowerCase().includes(fSupplier)) show = false;
+        if(fSku      && !tr.dataset.sku.toLowerCase().includes(fSku))           show = false;
+        if(fEan      && !tr.dataset.ean.toLowerCase().includes(fEan))           show = false;
         if(!isNaN(fStock) && fStock > 0 && parseInt(tr.dataset.stock) < fStock) show = false;
-        if(fStatus && tr.dataset.status !== fStatus)                     show = false;
+        if(fTr     && tr.dataset.tr !== fTr)                                    show = false;
+        if(fStatus && tr.dataset.status !== fStatus)                            show = false;
+        if(fData   && tr.dataset.data !== fData)                                show = false;
 
         tr.style.display = show ? '' : 'none';
         if(show) visible++;
@@ -960,7 +1079,6 @@ function filterTable(){
     var total = rows.length;
     document.getElementById('filter-count').textContent =
         visible < total ? ('Mostrati ' + visible + ' di ' + total) : (total + ' prodotti');
-    // sync master checkbox
     var vc = visibleChecks();
     var allOn = vc.length > 0 && vc.every(function(c){ return c.checked; });
     document.getElementById('chk-all').checked = allOn;
@@ -968,7 +1086,6 @@ function filterTable(){
     updateCount();
 }
 
-// init
 document.querySelectorAll('.prod-chk').forEach(function(c){
     c.addEventListener('change', updateCount);
 });
@@ -1876,14 +1993,25 @@ HTML;
                     COALESCE(sa.quantity, 0) AS quantity,
                     COALESCE(cp.enabled, 0) AS enabled,
                     COALESCE(cp.cds_status, 'none') AS cds_status,
-                    COALESCE(cp.last_error, '') AS last_error
+                    COALESCE(cp.last_error, '') AS last_error,
+                    p.weight AS weight,
+                    p.active AS active,
+                    COALESCE(m.name,'') AS manufacturer,
+                    COALESCE(sup.name,'') AS supplier,
+                    COALESCE(cl.name,'') AS category,
+                    COALESCE(tr.status,'none') AS tr_status
              FROM `{$p}product` p
              LEFT JOIN `{$p}product_lang` pl ON pl.id_product=p.id_product AND pl.id_lang={$idLang} AND pl.id_shop={$idShop}
              LEFT JOIN `{$p}product_shop` ps ON ps.id_product=p.id_product AND ps.id_shop={$idShop}
              LEFT JOIN `{$p}stock_available` sa ON sa.id_product=p.id_product AND sa.id_product_attribute=0 AND sa.id_shop={$idShop}
              LEFT JOIN `{$p}cds2_product` cp ON cp.id_product=p.id_product AND cp.id_product_attribute=0
+             LEFT JOIN `{$p}manufacturer` m ON m.id_manufacturer=p.id_manufacturer
+             LEFT JOIN `{$p}product_supplier` psu ON psu.id_product=p.id_product AND psu.id_product_attribute=0
+             LEFT JOIN `{$p}supplier` sup ON sup.id_supplier=psu.id_supplier
+             LEFT JOIN `{$p}category_lang` cl ON cl.id_category=p.id_category_default AND cl.id_lang={$idLang} AND cl.id_shop={$idShop}
+             LEFT JOIN `{$p}cds2_translation` tr ON tr.id_product=p.id_product AND tr.id_product_attribute=0
              WHERE p.active=1 AND NOT EXISTS (
-                 SELECT 1 FROM `{$p}product_attribute` pa WHERE pa.id_product=p.id_product LIMIT 1
+                 SELECT 1 FROM `{$p}product_attribute` pa2 WHERE pa2.id_product=p.id_product LIMIT 1
              )
              UNION ALL
              SELECT p.id_product, pa.id_product_attribute,
@@ -1895,7 +2023,13 @@ HTML;
                     COALESCE(sa.quantity, 0) AS quantity,
                     COALESCE(cp.enabled, 0) AS enabled,
                     COALESCE(cp.cds_status, 'none') AS cds_status,
-                    COALESCE(cp.last_error, '') AS last_error
+                    COALESCE(cp.last_error, '') AS last_error,
+                    (p.weight + pa.weight) AS weight,
+                    p.active AS active,
+                    COALESCE(m.name,'') AS manufacturer,
+                    COALESCE(sup.name,'') AS supplier,
+                    COALESCE(cl.name,'') AS category,
+                    COALESCE(tr.status,'none') AS tr_status
              FROM `{$p}product` p
              INNER JOIN `{$p}product_attribute` pa ON pa.id_product=p.id_product
              LEFT JOIN `{$p}product_lang` pl ON pl.id_product=p.id_product AND pl.id_lang={$idLang} AND pl.id_shop={$idShop}
@@ -1905,6 +2039,11 @@ HTML;
              LEFT JOIN `{$p}attribute` a ON a.id_attribute=pac.id_attribute
              LEFT JOIN `{$p}attribute_group_lang` agl ON agl.id_attribute_group=a.id_attribute_group AND agl.id_lang={$idLang}
              LEFT JOIN `{$p}cds2_product` cp ON cp.id_product=p.id_product AND cp.id_product_attribute=pa.id_product_attribute
+             LEFT JOIN `{$p}manufacturer` m ON m.id_manufacturer=p.id_manufacturer
+             LEFT JOIN `{$p}product_supplier` psu ON psu.id_product=p.id_product AND psu.id_product_attribute=pa.id_product_attribute
+             LEFT JOIN `{$p}supplier` sup ON sup.id_supplier=psu.id_supplier
+             LEFT JOIN `{$p}category_lang` cl ON cl.id_category=p.id_category_default AND cl.id_lang={$idLang} AND cl.id_shop={$idShop}
+             LEFT JOIN `{$p}cds2_translation` tr ON tr.id_product=p.id_product AND tr.id_product_attribute=pa.id_product_attribute
              WHERE p.active=1
              GROUP BY p.id_product, pa.id_product_attribute
              ORDER BY name ASC
