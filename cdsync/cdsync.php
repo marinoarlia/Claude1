@@ -1748,7 +1748,7 @@ HTML;
     private function geminiRequest($key, $prompt, $timeout = 30)
     {
         // Try models in order until one works
-        $models = ['gemini-2.0-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
+        $models = ['gemini-2.5-flash-lite-preview-06-17', 'gemini-2.5-flash', 'gemini-2.5-flash-preview-05-20', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest'];
         $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
 
         foreach ($models as $model) {
