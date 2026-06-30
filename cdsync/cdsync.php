@@ -1550,6 +1550,37 @@ HTML;
         return ['code' => $code, 'body' => $body, 'data' => json_decode($body, true)];
     }
 
+    private function apiCallWithHeaders($method, $path, $payload = null, $token = null, array $extraHeaders = [])
+    {
+        if (!$token) { $token = $this->getToken(); }
+        $sellerId = Configuration::get('CDS2_SELLER_ID');
+        $url      = self::API_BASE . $path;
+
+        $headers = array_merge([
+            'Authorization: Bearer ' . $token,
+            'SellerId: ' . $sellerId,
+            'Content-Type: application/json',
+            'Accept: application/json',
+        ], $extraHeaders);
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_CUSTOMREQUEST  => strtoupper($method),
+            CURLOPT_HTTPHEADER     => $headers,
+        ]);
+        if ($payload !== null) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+        }
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+        if ($err) { throw new RuntimeException('API cURL: ' . $err); }
+        return ['code' => $code, 'body' => $body, 'data' => json_decode($body, true)];
+    }
+
     // =========================================================================
     // SYNC OFFER
     // =========================================================================
@@ -1648,32 +1679,44 @@ HTML;
 
     private function downloadCategories()
     {
-        $token = $this->getToken();
-        $res   = $this->apiCall('GET', '/seller/v2/referential/categories', null, $token);
-        if ($res['code'] >= 400) {
-            return ['success' => false, 'message' => 'GET categories HTTP ' . $res['code'] . ': ' . substr($res['body'], 0, 300)];
+        $token   = $this->getToken();
+        $p       = _DB_PREFIX_;
+        $page    = 1;
+        $size    = 500;
+        $cnt     = 0;
+        $maxPage = 30;
+
+        while ($page <= $maxPage) {
+            $path = '/seller/v2/categories?pageIndex=' . $page . '&pageSize=' . $size
+                  . '&fields=label,level,isActive,parentReference,parentReferences&sort=label';
+            $res  = $this->apiCallWithHeaders('GET', $path, null, $token, ['Accept-Language: fr-FR']);
+            if ($res['code'] >= 400) {
+                return ['success' => false, 'message' => 'GET categories HTTP ' . $res['code'] . ': ' . substr($res['body'], 0, 300)];
+            }
+            $items = $res['data']['items'] ?? [];
+            if (!is_array($items) || empty($items)) { break; }
+
+            foreach ($items as $cat) {
+                $ref    = pSQL((string)($cat['categoryReference'] ?? ''));
+                $label  = pSQL((string)($cat['label'] ?? ''));
+                $level  = (int)($cat['level'] ?? 0);
+                $active = !empty($cat['isActive']) ? 1 : 0;
+                $pRef   = pSQL((string)($cat['parentReference'] ?? ''));
+                if (!$ref) { continue; }
+                Db::getInstance()->execute(
+                    "INSERT INTO `{$p}cds2_category` (reference,label,level,is_active,parent_reference,updated_at)
+                     VALUES ('{$ref}','{$label}',{$level},{$active}," . ($pRef ? "'{$pRef}'" : 'NULL') . ",NOW())
+                     ON DUPLICATE KEY UPDATE label='{$label}',level={$level},is_active={$active},
+                     parent_reference=" . ($pRef ? "'{$pRef}'" : 'NULL') . ",updated_at=NOW()"
+                );
+                $cnt++;
+            }
+
+            if (count($items) < $size) { break; }
+            $page++;
         }
-        $categories = $res['data']['categories'] ?? $res['data'] ?? [];
-        if (!is_array($categories)) {
-            return ['success' => false, 'message' => 'Risposta categorie non valida: ' . substr($res['body'], 0, 200)];
-        }
-        $p   = _DB_PREFIX_;
-        $cnt = 0;
-        foreach ($categories as $cat) {
-            $ref    = pSQL((string)($cat['code'] ?? $cat['reference'] ?? ''));
-            $label  = pSQL((string)($cat['label'] ?? $cat['name'] ?? ''));
-            $level  = (int)($cat['level'] ?? 0);
-            $active = isset($cat['isActive']) ? (int)(bool)$cat['isActive'] : 1;
-            $pRef   = pSQL((string)($cat['parentCode'] ?? $cat['parentReference'] ?? ''));
-            if (!$ref) { continue; }
-            Db::getInstance()->execute(
-                "INSERT INTO `{$p}cds2_category` (reference,label,level,is_active,parent_reference,updated_at)
-                 VALUES ('{$ref}','{$label}',{$level},{$active}," . ($pRef ? "'{$pRef}'" : 'NULL') . ",NOW())
-                 ON DUPLICATE KEY UPDATE label='{$label}',level={$level},is_active={$active},
-                 parent_reference=" . ($pRef ? "'{$pRef}'" : 'NULL') . ",updated_at=NOW()"
-            );
-            $cnt++;
-        }
+
+        Configuration::updateValue('CDS2_CATEGORY_LAST_SYNC', date('Y-m-d H:i:s'));
         return ['success' => true, 'count' => $cnt];
     }
 
