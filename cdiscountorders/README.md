@@ -2,6 +2,8 @@
 
 Modulo separato dal catalogo `cdiscountsync`.
 
+Versione 1.0.15: risolto il fatal all'apertura della configurazione. Le tabelle "Ultimi ordini" e "Log recenti" non caricano più i campi LONGTEXT `raw_order`/`payload` (causa probabile della saturazione di memoria in rendering); il guardiano dei fatal e il limite di memoria vengono attivati all'inizio di ogni caricamento della pagina, così un eventuale errore mostra il messaggio reale invece di "Errore fatale"; ogni pannello è isolato e un errore non blocca l'intera pagina.
+
 Versione 1.0.14: la sincronizzazione alza il limite di memoria a 512M (la creazione ordine attiva gli hook dei moduli terzi di spedizione/stock che possono saturare la memoria). Inoltre, nel back office, un errore fatale durante "Scarica ordini adesso" mostra ora il **messaggio d'errore reale** invece di una pagina "Errore fatale" vuota, così la causa è immediatamente diagnosticabile.
 
 Versione 1.0.13: il modulo è ora **autonomo**. Le credenziali Octopia (Client ID, Client Secret, Seller ID, Sales Channel ID) si inseriscono e si salvano direttamente nel pannello **"Credenziali Octopia"** della configurazione del modulo, senza dipendere dal modulo `cdiscountsync`. Aggiunto il pulsante **"Verifica connessione"** che richiede un token a Octopia per validare subito le credenziali. Chi aggiorna da una versione precedente si vede riprese automaticamente le credenziali già presenti. Aggiunto inoltre un fallback sull'indirizzo di consegna letto a livello di ordine (oltre che per riga), per evitare il blocco "Indirizzo di consegna non ancora disponibile".

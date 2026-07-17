@@ -16,7 +16,7 @@ class CdiscountOrders extends PaymentModule
     {
         $this->name = 'cdiscountorders';
         $this->tab = 'market_place';
-        $this->version = '1.0.14';
+        $this->version = '1.0.15';
         $this->author = 'Masterbrico';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -101,6 +101,12 @@ class CdiscountOrders extends PaymentModule
 
     public function getContent()
     {
+        // Registriamo subito il guardiano dei fatal e alziamo la memoria: così
+        // qualsiasi errore fatale nel rendering della pagina (non solo nel
+        // pulsante di sync) mostra il messaggio reale invece di "Errore fatale".
+        @ini_set('memory_limit', '512M');
+        $this->registerFatalHandler('admin');
+
         $output = '';
         if (Tools::isSubmit('submitCdiscountOrdersCredentials')) {
             $output .= $this->saveCredentials();
@@ -139,7 +145,12 @@ class CdiscountOrders extends PaymentModule
             $output .= $this->displayConfirmation($this->l('Credenziali Octopia configurate. Usa "Verifica connessione" per un controllo rapido.'));
         }
 
-        return $output.$this->renderCredentials().$this->renderConfiguration().$this->renderStatus().$this->renderRecentOrders().$this->renderRecentLogs();
+        return $output
+            .$this->safePanel('renderCredentials')
+            .$this->safePanel('renderConfiguration')
+            .$this->safePanel('renderStatus')
+            .$this->safePanel('renderRecentOrders')
+            .$this->safePanel('renderRecentLogs');
     }
 
     public function syncOrders()
@@ -703,9 +714,25 @@ class CdiscountOrders extends PaymentModule
         </div>';
     }
 
+    private function safePanel($method)
+    {
+        try {
+            return (string) $this->$method();
+        } catch (Throwable $e) {
+            return '<div class="alert alert-danger">Errore nel pannello '
+                .htmlspecialchars((string) $method, ENT_QUOTES, 'UTF-8').': '
+                .htmlspecialchars((string) $e->getMessage(), ENT_QUOTES, 'UTF-8').'</div>';
+        }
+    }
+
     private function renderRecentOrders()
     {
-        $rows = Db::getInstance()->executeS('SELECT * FROM `'._DB_PREFIX_.'cdiscountorders_order` ORDER BY id_cdiscountorders_order DESC LIMIT 30');
+        // Selezioniamo solo le colonne necessarie: raw_order è un LONGTEXT
+        // che, moltiplicato per le righe, può esaurire la memoria in rendering.
+        $rows = Db::getInstance()->executeS(
+            'SELECT octopia_order_id, id_order, octopia_status, imported_at, shipment_sent_at, carrier_name, shipment_number, last_error'
+            .' FROM `'._DB_PREFIX_.'cdiscountorders_order` ORDER BY id_cdiscountorders_order DESC LIMIT 30'
+        );
         $html = '<div class="panel"><div class="panel-heading"><i class="icon-shopping-cart"></i> Ultimi ordini Octopia</div><div class="table-responsive"><table class="table"><thead><tr><th>Ordine Octopia</th><th>Ordine PrestaShop</th><th>Stato</th><th>Importato</th><th>Spedizione inviata</th><th>Errore</th></tr></thead><tbody>';
         if (!$rows) {
             $html .= '<tr><td colspan="6">Nessun ordine ancora acquisito.</td></tr>';
@@ -720,7 +747,12 @@ class CdiscountOrders extends PaymentModule
 
     private function renderRecentLogs()
     {
-        $rows = Db::getInstance()->executeS('SELECT * FROM `'._DB_PREFIX_.'cdiscountorders_log` ORDER BY id_cdiscountorders_log DESC LIMIT 50');
+        // Escludiamo la colonna payload (LONGTEXT fino a ~120 KB per riga):
+        // non serve nella tabella e può saturare la memoria del back office.
+        $rows = Db::getInstance()->executeS(
+            'SELECT created_at, level, action, octopia_order_id, message'
+            .' FROM `'._DB_PREFIX_.'cdiscountorders_log` ORDER BY id_cdiscountorders_log DESC LIMIT 50'
+        );
         $html = '<div class="panel"><div class="panel-heading"><i class="icon-list"></i> Log recenti</div><div class="table-responsive"><table class="table"><thead><tr><th>Data</th><th>Livello</th><th>Azione</th><th>Ordine</th><th>Messaggio</th></tr></thead><tbody>';
         if (!$rows) {
             $html .= '<tr><td colspan="5">Nessun log.</td></tr>';
