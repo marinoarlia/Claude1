@@ -20,6 +20,9 @@ class OctopiaOrdersService
     public function syncOrders()
     {
         @set_time_limit(240);
+        // La creazione ordine PrestaShop attiva gli hook di eventuali moduli
+        // terzi (spedizioni, stock, ecc.) che possono saturare la memoria.
+        @ini_set('memory_limit', '512M');
         $summary = [
             'success' => false,
             'read' => 0,

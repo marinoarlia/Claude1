@@ -16,7 +16,7 @@ class CdiscountOrders extends PaymentModule
     {
         $this->name = 'cdiscountorders';
         $this->tab = 'market_place';
-        $this->version = '1.0.13';
+        $this->version = '1.0.14';
         $this->author = 'Masterbrico';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -373,6 +373,22 @@ class CdiscountOrders extends PaymentModule
                 http_response_code(500);
             }
             echo json_encode(['success' => false, 'message' => $message], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        } elseif ($mode === 'admin') {
+            // Nel back office mostriamo il dettaglio reale invece di una pagina
+            // "Errore fatale" vuota, così la causa è subito visibile.
+            while (ob_get_level() > 0) {
+                @ob_end_clean();
+            }
+            if (!headers_sent()) {
+                header('Content-Type: text/html; charset=utf-8');
+                http_response_code(500);
+            }
+            echo '<div style="font-family:sans-serif;max-width:900px;margin:24px auto;padding:16px 20px;'
+                .'border:2px solid #c0392b;border-radius:6px;background:#fdecea;color:#7b241c;">'
+                .'<h2 style="margin-top:0">Errore fatale durante la sincronizzazione Octopia</h2>'
+                .'<p>'.htmlspecialchars($message, ENT_QUOTES, 'UTF-8').'</p>'
+                .'<p style="margin-bottom:0">Il dettaglio è stato salvato anche nei log del modulo '
+                .'e nel riquadro diagnostica della configurazione.</p></div>';
         }
     }
 

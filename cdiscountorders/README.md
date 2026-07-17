@@ -2,6 +2,8 @@
 
 Modulo separato dal catalogo `cdiscountsync`.
 
+Versione 1.0.14: la sincronizzazione alza il limite di memoria a 512M (la creazione ordine attiva gli hook dei moduli terzi di spedizione/stock che possono saturare la memoria). Inoltre, nel back office, un errore fatale durante "Scarica ordini adesso" mostra ora il **messaggio d'errore reale** invece di una pagina "Errore fatale" vuota, così la causa è immediatamente diagnosticabile.
+
 Versione 1.0.13: il modulo è ora **autonomo**. Le credenziali Octopia (Client ID, Client Secret, Seller ID, Sales Channel ID) si inseriscono e si salvano direttamente nel pannello **"Credenziali Octopia"** della configurazione del modulo, senza dipendere dal modulo `cdiscountsync`. Aggiunto il pulsante **"Verifica connessione"** che richiede un token a Octopia per validare subito le credenziali. Chi aggiorna da una versione precedente si vede riprese automaticamente le credenziali già presenti. Aggiunto inoltre un fallback sull'indirizzo di consegna letto a livello di ordine (oltre che per riga), per evitare il blocco "Indirizzo di consegna non ancora disponibile".
 
 Versione 1.0.12: l'importazione di un ordine problematico non blocca più l'intera sincronizzazione. Aggiunti isolamento per singolo ordine, timeout compatibili con il back office, checkpoint dell'importazione, cattura degli errori PHP fatali, log non bloccanti e gestione compatibile PrestaShop 8.1 delle righe generiche per SKU mancanti. `Ultimo controllo` viene aggiornato a ogni esecuzione conclusa e viene mostrato separatamente l'ultimo controllo senza errori.
