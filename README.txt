@@ -1,5 +1,29 @@
-EBAY EAN13 IMPORTER v1.1.0
+EBAY EAN13 IMPORTER v1.1.1
 ===========================
+
+CORREZIONE v1.1.1 - "EAN gia' presente" ma nel report eBay l'EAN non c'e'
+Causa: eBay conserva l'EAN in due campi distinti e la v1.0.9 li fondeva in un
+valore solo.
+- Identificatore di prodotto (ProductListingDetails.EAN): e' il valore che eBay
+  pubblica nella colonna "P:EAN" dei report venditore scaricabili.
+- Specifica oggetto "EAN": e' solo una caratteristica dell'inserzione e in
+  quella colonna non compare.
+Un'inserzione con la sola specifica oggetto veniva quindi dichiarata "EAN gia'
+presente - nessuna modifica necessaria" e saltata, pur avendo su eBay
+l'identificatore di prodotto vuoto.
+
+- I due campi vengono ora letti e mostrati separatamente.
+- Se l'identificatore di prodotto e' vuoto, la riga viene aggiornata anche
+  quando la specifica oggetto contiene gia' lo stesso EAN, per allineare i due
+  campi. Se la specifica contiene un EAN diverso resta un conflitto e non
+  viene sovrascritta.
+- Nuovo stato "Solo specifiche oggetto": eBay ha accettato la specifica ma non
+  ha registrato l'identificatore di prodotto. Non viene piu' segnalato come
+  inserimento riuscito; di norma significa che la categoria non accetta il
+  codice a barre.
+- Nuova colonna "Fonte EAN eBay" nella tabella e nel report CSV, con la
+  colonna aggiuntiva "EAN SPECIFICHE OGGETTO", per riconciliare i risultati
+  con il report scaricato da eBay.
 
 CORREZIONE v1.1.0 - "eBay ha accettato la richiesta ma non ha salvato l'EAN"
 Causa: l'EAN veniva scritto solo in ProductListingDetails.EAN. Quel campo non
@@ -65,10 +89,10 @@ CORREZIONE TRASPORTO XML
 
 AGGIORNAMENTO HOSTINGER
 1. Apri la cartella /ebay che contiene l'index.php attualmente in uso.
-2. Carica qui lo ZIP v1.1.0 ed estrailo direttamente dentro /ebay.
+2. Carica qui lo ZIP v1.1.1 ed estrailo direttamente dentro /ebay.
 3. Conferma la sovrascrittura di tutti i file.
 4. Non cancellare la cartella data: contiene le credenziali gia salvate.
-5. Ricarica la pagina con Ctrl+F5 e verifica che sotto il titolo compaia v1.1.0.
+5. Ricarica la pagina con Ctrl+F5 e verifica che sotto il titolo compaia v1.1.1.
 6. Premi "Verifica collegamento".
 
 INSTALLAZIONE NUOVA
@@ -93,9 +117,12 @@ Più varianti possono condividere lo stesso ITEM ID.
 
 SICUREZZA OPERATIVA
 - L'app fa prima un controllo eBay in sola lettura.
-- Inserisce l'EAN solo se il campo eBay è vuoto/non applicabile.
-- Se eBay contiene già lo stesso EAN: nessuna modifica.
-- Se eBay contiene un EAN diverso: NON lo sovrascrive.
+- Inserisce l'EAN solo se l'identificatore di prodotto eBay è vuoto/non applicabile.
+- Se l'identificatore di prodotto contiene già lo stesso EAN: nessuna modifica.
+- Se contiene un EAN diverso: NON lo sovrascrive.
+- Se l'identificatore è vuoto ma la specifica oggetto contiene già lo stesso
+  EAN, i due campi vengono allineati; se la specifica contiene un EAN diverso,
+  la riga resta in conflitto e non viene toccata.
 - Per le varianti mantiene invariati prezzo e quantità disponibili durante la revisione EAN.
 - Non modifica titolo, prezzo o quantità.
 - Per le varianti rimanda a eBay prezzo e VariationSpecifics già letti, invariati,

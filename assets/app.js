@@ -18,7 +18,7 @@
       if(done&&$('#updateBtn')) $('#updateBtn').disabled=(j.counts.ready||0)===0;
     }
     if(j.rows){
-      $('#tbody').innerHTML=j.rows.map(r=>`<tr><td>${r.excel_row}</td><td>${esc(r.sku)}</td><td>${esc(r.item_id)}</td><td>${esc(r.ean)}</td><td>${esc(r.remote?.existing_ean||'')}</td><td>${esc(r.remote?.title||'')}</td><td class="st-${esc(r.status)}">${esc(r.status_label)}</td><td>${esc(r.message||'')}</td></tr>`).join('');
+      $('#tbody').innerHTML=j.rows.map(r=>`<tr><td>${r.excel_row}</td><td>${esc(r.sku)}</td><td>${esc(r.item_id)}</td><td>${esc(r.ean)}</td><td>${esc(r.shown_ean||'')}</td><td>${esc(r.source_label||'')}</td><td>${esc(r.remote?.title||'')}</td><td class="st-${esc(r.status)}">${esc(r.status_label)}</td><td>${esc(r.message||'')}</td></tr>`).join('');
     }
   }
   async function loop(action,button){

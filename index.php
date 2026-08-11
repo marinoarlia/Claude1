@@ -5,6 +5,7 @@ session_start();
 $config = require __DIR__ . '/config.php';
 require __DIR__ . '/src/XlsReader.php';
 require __DIR__ . '/src/EbayClient.php';
+require __DIR__ . '/src/EanStatus.php';
 require __DIR__ . '/src/JobStore.php';
 
 if (!is_dir($config['data_dir'])) @mkdir($config['data_dir'], 0700, true);
@@ -30,12 +31,32 @@ function validEan13(string $ean): bool {
 function labelFor(string $status): string {
     return [
         'pending'=>'Da controllare','ready'=>'EAN mancante','present'=>'EAN già presente','conflict'=>'EAN diverso già presente',
-        'invalid'=>'Riga non valida','error'=>'Errore','updated'=>'EAN inserito'
+        'invalid'=>'Riga non valida','error'=>'Errore','updated'=>'EAN inserito','partial'=>'Solo specifiche oggetto'
     ][$status] ?? $status;
+}
+/** EAN letto su eBay: l'identificatore di prodotto, o in mancanza la specifica oggetto. */
+function shownEan(array $row): string {
+    $ean = trim((string)($row['remote']['existing_ean'] ?? ''));
+    return $ean !== '' ? $ean : trim((string)($row['remote']['specific_ean'] ?? ''));
+}
+/**
+ * Dove eBay conserva l'EAN letto. "Identificatore prodotto" è il solo campo che
+ * compare nella colonna P:EAN dei report venditore scaricabili da eBay.
+ */
+function sourceLabel(string $source): string {
+    return [
+        'product'=>'Identificatore prodotto (P:EAN)','specific'=>'Solo specifiche oggetto',
+        'variation'=>'Identificatore variante','inventory'=>'Inventory API'
+    ][$source] ?? '';
 }
 function jobPayload(array $job): array {
     $counts=[];
-    foreach($job['rows'] as &$r){$r['status_label']=labelFor((string)$r['status']);$counts[$r['status']]=($counts[$r['status']]??0)+1;}
+    foreach($job['rows'] as &$r){
+        $r['status_label']=labelFor((string)$r['status']);
+        $r['source_label']=sourceLabel((string)($r['remote']['ean_source']??''));
+        $r['shown_ean']=shownEan($r);
+        $counts[$r['status']]=($counts[$r['status']]??0)+1;
+    }
     unset($r);
     return ['ok'=>true,'total'=>count($job['rows']),'counts'=>$counts,'rows'=>$job['rows']];
 }
@@ -107,10 +128,8 @@ try {
             foreach($itemIds as $itemId){
                 foreach($job['rows'] as &$r){
                     if($r['status']!=='pending'||$r['item_id']!==$itemId)continue;
-                    try{$remote=$client->inspectItem($r['item_id'],$r['sku']);$r['remote']=$remote;$old=(string)$remote['existing_ean'];
-                        if(EbayClient::eanMissing($old)){$r['status']='ready';$r['message']='Pronto per inserimento.';}
-                        elseif($old===$r['ean']){$r['status']='present';$r['message']='Nessuna modifica necessaria.';}
-                        else{$r['status']='conflict';$r['message']='eBay ha già un EAN diverso: non verrà sovrascritto.';}
+                    try{$remote=$client->inspectItem($r['item_id'],$r['sku']);$r['remote']=$remote;
+                        [$r['status'],$r['message']]=EanStatus::classify($r['ean'],(string)$remote['existing_ean'],(string)($remote['specific_ean']??''));
                     }catch(Throwable $e){$r['status']='error';$r['message']=$e->getMessage();}
                 }unset($r);
             }
@@ -141,6 +160,7 @@ try {
                         $i=$idx[$k];
                         $job['rows'][$i]['status']='updated';
                         $job['rows'][$i]['remote']['existing_ean']=$client->inventoryEan($verified);
+                        $job['rows'][$i]['remote']['ean_source']='inventory';
                         $job['rows'][$i]['message']='EAN13 inserito e verificato tramite Inventory API eBay.';
                     }
                 }else{
@@ -152,8 +172,9 @@ try {
                         // vanno rimandate tutte insieme alla nuova coppia EAN.
                         $fresh=$client->inspectItem($target,$ready[0]['sku'],true,true);
                         if(($fresh['type']??'')!=='single')throw new RuntimeException('La struttura dell’inserzione eBay è cambiata.');
-                        $freshEan=(string)($fresh['existing_ean']??'');
+                        $freshEan=(string)($fresh['existing_ean']??'');$freshSpec=(string)($fresh['specific_ean']??'');
                         if(!EbayClient::eanMissing($freshEan)&&$freshEan!==$ready[0]['ean'])throw new RuntimeException('EAN eBay modificato dopo il controllo: aggiornamento bloccato.');
+                        if(!EbayClient::eanMissing($freshSpec)&&$freshSpec!==$ready[0]['ean'])throw new RuntimeException('Specifica oggetto EAN modificata dopo il controllo: aggiornamento bloccato.');
                         $revisionWarnings=$client->reviseSingle($target,$ready[0]['ean'],$fresh['revision_data']??[]);
                     }
                     else{
@@ -174,9 +195,17 @@ try {
                             $extra=$revisionWarnings?' Avvisi eBay: '.implode(' | ',$revisionWarnings):'';
                             throw new RuntimeException($confirmError->getMessage().$extra);
                         }
-                        $job['rows'][$i]['status']='updated';
+                        $warn=$revisionWarnings?' Avvisi eBay: '.implode(' | ',$revisionWarnings):'';
                         $job['rows'][$i]['remote']=$confirmed;
-                        $job['rows'][$i]['message']='EAN13 inserito nelle specifiche oggetto e verificato tramite Trading API eBay.';
+                        if(($confirmed['ean_confirmed']??'')==='specific'){
+                            // eBay ha accettato la specifica oggetto ma non l'identificatore
+                            // di prodotto: nei report venditore la colonna P:EAN resta vuota.
+                            $job['rows'][$i]['status']='partial';
+                            $job['rows'][$i]['message']='EAN13 salvato solo nelle specifiche oggetto: eBay non ha registrato l’identificatore di prodotto, nel report eBay la colonna P:EAN resterà vuota. Verifica che la categoria accetti il codice a barre.'.$warn;
+                        }else{
+                            $job['rows'][$i]['status']='updated';
+                            $job['rows'][$i]['message']='EAN13 inserito e verificato tramite Trading API eBay.';
+                        }
                     }
                 }
             }catch(Throwable $e){foreach($idx as $i){$job['rows'][$i]['status']='error';$job['rows'][$i]['message']=$e->getMessage();}}
@@ -187,8 +216,8 @@ try {
     if ($action==='report' && isset($_GET['job'])) {
         $job=(new JobStore((string)$config['data_dir']))->load((string)$_GET['job']);
         header('Content-Type: text/csv; charset=utf-8');header('Content-Disposition: attachment; filename="report_ebay_ean13.csv"');
-        $o=fopen('php://output','w');fwrite($o,"\xEF\xBB\xBF");fputcsv($o,['RIGA','SKU','ITEM ID','EAN13 FILE','EAN EBAY','STATO','MESSAGGIO'],';');
-        foreach($job['rows'] as $r)fputcsv($o,[$r['excel_row'],$r['sku'],$r['item_id'],$r['ean'],$r['remote']['existing_ean']??'',labelFor($r['status']),$r['message']],';');fclose($o);exit;
+        $o=fopen('php://output','w');fwrite($o,"\xEF\xBB\xBF");fputcsv($o,['RIGA','SKU','ITEM ID','EAN13 FILE','EAN EBAY','FONTE EAN EBAY','EAN SPECIFICHE OGGETTO','STATO','MESSAGGIO'],';');
+        foreach($job['rows'] as $r)fputcsv($o,[$r['excel_row'],$r['sku'],$r['item_id'],$r['ean'],shownEan($r),sourceLabel((string)($r['remote']['ean_source']??'')),$r['remote']['specific_ean']??'',labelFor($r['status']),$r['message']],';');fclose($o);exit;
     }
 } catch (Throwable $e) {
     if ($_SERVER['REQUEST_METHOD']==='POST' && in_array($action,['check_batch','update_batch'],true)) jsonOut(['ok'=>false,'error'=>$e->getMessage()],400);
@@ -198,9 +227,9 @@ try {
 $settings=loadSettings($config);$job=null;$payload=null;
 if(!empty($_GET['job'])){try{$job=(new JobStore((string)$config['data_dir']))->load((string)$_GET['job']);$payload=jobPayload($job);}catch(Throwable $e){$error=$e->getMessage();}}
 ?><!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>eBay EAN13 Importer</title><link rel="stylesheet" href="assets/app.css"></head><body><main class="wrap">
-<div class="top"><div><h1>eBay EAN13 Importer</h1><div class="muted">Inserisce EAN13 solo dove manca · <strong>v1.1.0</strong></div></div><a class="btn secondary" href="?action=logout">Esci</a></div>
+<div class="top"><div><h1>eBay EAN13 Importer</h1><div class="muted">Inserisce EAN13 solo dove manca · <strong>v1.1.1</strong></div></div><a class="btn secondary" href="?action=logout">Esci</a></div>
 <?php if(!empty($error)):?><div class="alert err"><?=h($error)?></div><?php endif?><?php if(!empty($notice)):?><div class="alert ok"><?=h($notice)?></div><?php endif?>
 <section class="card"><h2>1. Collegamento eBay</h2><form method="post"><input type="hidden" name="csrf" value="<?=h($_SESSION['csrf'])?>"><div class="grid"><div><label>Client ID</label><input type="text" name="client_id" value="<?=h((string)($settings['client_id']??''))?>" required></div><div><label>Client Secret</label><input type="password" name="client_secret" value="<?=h((string)($settings['client_secret']??''))?>" required></div><div><label>Refresh Token</label><input type="password" name="refresh_token" value="<?=h((string)($settings['refresh_token']??''))?>" required></div><div><label>RuName</label><input type="text" name="ru_name" value="<?=h((string)($settings['ru_name']??''))?>"></div></div><label>Scope</label><textarea name="scope" rows="3"><?=h((string)($settings['scope']??''))?></textarea><p class="row"><button class="btn" name="action" value="save_settings">Salva credenziali</button><button class="btn secondary" name="action" value="test_connection">Verifica collegamento</button></p></form></section>
 <section class="card"><h2>2. Carica file .xls</h2><p class="muted">Primo foglio, riga 1: <b>SKU | ITEM ID | EAN13</b>. Dati dalla riga 2.</p><form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="<?=h($_SESSION['csrf'])?>"><input type="hidden" name="action" value="upload"><input type="file" name="xls" accept=".xls,application/vnd.ms-excel" required><p><button class="btn">Carica XLS</button></p></form></section>
-<?php if($job&&$payload):?><section class="card"><h2>3. Controllo e aggiornamento</h2><div class="progress"><i id="bar" style="width:<?=round((($payload['total']-($payload['counts']['pending']??0))/max(1,$payload['total']))*100)?>%"></i></div><div id="counts" class="counts"><?php foreach($payload['counts'] as $k=>$v):?><span><b><?=h($k)?></b>: <?=$v?></span><?php endforeach?></div><p class="row"><button id="checkBtn" class="btn" <?=empty($payload['counts']['pending'])?'disabled':''?>>Controlla su eBay</button><button id="updateBtn" class="btn danger" <?=empty($payload['counts']['ready'])?'disabled':''?>>Inserisci EAN mancanti</button><a class="btn secondary" href="?action=report&amp;job=<?=h($job['id'])?>">Scarica report CSV</a></p><div class="tablebox"><table><thead><tr><th>Riga</th><th>SKU</th><th>Item ID</th><th>EAN file</th><th>EAN eBay</th><th>Titolo</th><th>Stato</th><th>Messaggio</th></tr></thead><tbody id="tbody"><?php foreach($payload['rows'] as $r):?><tr><td><?=$r['excel_row']?></td><td><?=h($r['sku'])?></td><td><?=h($r['item_id'])?></td><td><?=h($r['ean'])?></td><td><?=h((string)($r['remote']['existing_ean']??''))?></td><td><?=h((string)($r['remote']['title']??''))?></td><td class="st-<?=h($r['status'])?>"><?=h($r['status_label'])?></td><td><?=h($r['message'])?></td></tr><?php endforeach?></tbody></table></div></section><script>window.EAN_APP=<?=json_encode(['csrf'=>$_SESSION['csrf'],'job'=>$job['id']],JSON_UNESCAPED_SLASHES)?>;</script><script src="assets/app.js"></script><?php endif?>
+<?php if($job&&$payload):?><section class="card"><h2>3. Controllo e aggiornamento</h2><div class="progress"><i id="bar" style="width:<?=round((($payload['total']-($payload['counts']['pending']??0))/max(1,$payload['total']))*100)?>%"></i></div><div id="counts" class="counts"><?php foreach($payload['counts'] as $k=>$v):?><span><b><?=h($k)?></b>: <?=$v?></span><?php endforeach?></div><p class="row"><button id="checkBtn" class="btn" <?=empty($payload['counts']['pending'])?'disabled':''?>>Controlla su eBay</button><button id="updateBtn" class="btn danger" <?=empty($payload['counts']['ready'])?'disabled':''?>>Inserisci EAN mancanti</button><a class="btn secondary" href="?action=report&amp;job=<?=h($job['id'])?>">Scarica report CSV</a></p><div class="tablebox"><table><thead><tr><th>Riga</th><th>SKU</th><th>Item ID</th><th>EAN file</th><th>EAN eBay</th><th>Fonte EAN eBay</th><th>Titolo</th><th>Stato</th><th>Messaggio</th></tr></thead><tbody id="tbody"><?php foreach($payload['rows'] as $r):?><tr><td><?=$r['excel_row']?></td><td><?=h($r['sku'])?></td><td><?=h($r['item_id'])?></td><td><?=h($r['ean'])?></td><td><?=h((string)($r['shown_ean']??''))?></td><td><?=h((string)($r['source_label']??''))?></td><td><?=h((string)($r['remote']['title']??''))?></td><td class="st-<?=h($r['status'])?>"><?=h($r['status_label'])?></td><td><?=h($r['message'])?></td></tr><?php endforeach?></tbody></table></div></section><script>window.EAN_APP=<?=json_encode(['csrf'=>$_SESSION['csrf'],'job'=>$job['id']],JSON_UNESCAPED_SLASHES)?>;</script><script src="assets/app.js"></script><?php endif?>
 </main></body></html>

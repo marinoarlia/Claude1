@@ -66,12 +66,16 @@ final class EbayClient
                     foreach ($nvl->xpath('./*[local-name()="Value"]') ?: [] as $v) $values[] = (string)$v;
                     if ($name !== '') $specifics[] = ['name' => $name, 'values' => $values];
                 }
+                $ean = trim($ean);
+                if (self::eanMissing($ean)) $ean = '';
                 return [
                     'title' => $title,
                     'type' => 'variation',
                     'remote_sku' => $remoteSku,
                     'category_id' => $categoryId,
-                    'existing_ean' => trim($ean),
+                    'existing_ean' => $ean,
+                    'specific_ean' => '',
+                    'ean_source' => $ean !== '' ? 'variation' : '',
                     'variation' => [
                         'sku' => $remoteSku,
                         'quantity' => max(0, (int)$this->relativeText($variation, './*[local-name()="Quantity"]')
@@ -93,16 +97,22 @@ final class EbayClient
             $item,
             './*[local-name()="ItemSpecifics"]/*[local-name()="NameValueList"]'
         );
-        $ean = trim($this->relativeText($item, './*[local-name()="ProductListingDetails"]/*[local-name()="EAN"]'));
-        if (self::eanMissing($ean)) {
-            foreach ($itemSpecifics as $specific) {
-                if (strcasecmp(trim((string)$specific['name']), 'EAN') !== 0) continue;
-                foreach ($specific['values'] as $value) {
-                    $value = trim((string)$value);
-                    if (!self::eanMissing($value)) {
-                        $ean = $value;
-                        break 2;
-                    }
+        // Le due sedi dell'EAN vanno lette separatamente, perche' eBay le tratta
+        // come dati distinti: ProductListingDetails.EAN e' l'identificatore di
+        // prodotto (la colonna "P:EAN" dei report venditore), mentre la specifica
+        // oggetto "EAN" e' una caratteristica dell'inserzione. Fonderle, come
+        // faceva la v1.0.9, faceva risultare "EAN gia' presente" inserzioni il
+        // cui identificatore di prodotto su eBay era in realta' vuoto.
+        $productEan = trim($this->relativeText($item, './*[local-name()="ProductListingDetails"]/*[local-name()="EAN"]'));
+        if (self::eanMissing($productEan)) $productEan = '';
+        $specificEan = '';
+        foreach ($itemSpecifics as $specific) {
+            if (strcasecmp(trim((string)$specific['name']), self::EAN_SPECIFIC_NAME) !== 0) continue;
+            foreach ($specific['values'] as $value) {
+                $value = trim((string)$value);
+                if (!self::eanMissing($value)) {
+                    $specificEan = $value;
+                    break 2;
                 }
             }
         }
@@ -112,7 +122,9 @@ final class EbayClient
             'type' => 'single',
             'remote_sku' => $remoteSku,
             'category_id' => $categoryId,
-            'existing_ean' => $ean,
+            'existing_ean' => $productEan,
+            'specific_ean' => $specificEan,
+            'ean_source' => $productEan !== '' ? 'product' : ($specificEan !== '' ? 'specific' : ''),
             'variation' => null,
         ];
         if ($includeRevisionData) {
@@ -316,6 +328,12 @@ final class EbayClient
      * Conferma il dato rileggendo eBay, non il payload appena inviato.
      * L'indicizzazione della revisione non e' immediata: attendiamo con pause
      * crescenti prima di dichiarare fallito l'inserimento.
+     *
+     * La conferma piena richiede l'identificatore di prodotto, l'unico che eBay
+     * espone nella colonna "P:EAN" dei report venditore. Se eBay ha salvato solo
+     * la specifica oggetto, la rilettura viene restituita con ean_confirmed =
+     * 'specific': l'esito e' parziale e va segnalato come tale, non come
+     * inserimento riuscito.
      */
     public function confirmEan(string $itemId, string $sku, string $expected): array
     {
@@ -325,7 +343,14 @@ final class EbayClient
             if ($attempt > 0) sleep($attempt);
             $current = $this->inspectItem($itemId, $sku, true);
             $actual = trim((string)($current['existing_ean'] ?? ''));
-            if ($actual === $expected) return $current;
+            if ($actual === $expected) {
+                $current['ean_confirmed'] = 'product';
+                return $current;
+            }
+        }
+        if (trim((string)($current['specific_ean'] ?? '')) === $expected) {
+            $current['ean_confirmed'] = 'specific';
+            return $current;
         }
         throw new RuntimeException(
             'eBay ha accettato la richiesta ma non ha salvato l\'EAN. '

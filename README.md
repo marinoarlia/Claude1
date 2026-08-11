@@ -14,9 +14,24 @@ Un EAN diverso gia' presente non viene mai sovrascritto.
 | --- | --- |
 | `index.php` | Interfaccia, login, upload XLS, orchestrazione dei batch |
 | `src/EbayClient.php` | Chiamate Trading API (XML) e Inventory API (REST) |
+| `src/EanStatus.php` | Classificazione di una riga dopo la lettura da eBay |
 | `src/XlsReader.php` | Lettore BIFF8/OLE2 per i file `.xls` |
 | `src/JobStore.php` | Persistenza delle lavorazioni su file JSON |
 | `config.php` | Password app, site ID eBay, cartella dati |
+
+## I due campi EAN di eBay
+
+eBay conserva l'EAN in due posti diversi, che l'app tiene separati:
+
+| Campo | Trading API | Report venditore eBay |
+| --- | --- | --- |
+| Identificatore di prodotto | `ProductListingDetails.EAN` | colonna `P:EAN` |
+| Specifica oggetto | `ItemSpecifics.NameValueList` con `Name = EAN` | non compare |
+
+Solo il primo e' l'identificatore di prodotto pubblicato nei report scaricabili
+da eBay. Un'inserzione puo' avere la specifica oggetto valorizzata e
+l'identificatore vuoto: in quel caso l'app la considera **da aggiornare**, per
+allineare i due campi, e non "gia' a posto".
 
 ## Come viene scritto l'EAN
 
