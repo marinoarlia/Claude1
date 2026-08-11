@@ -1,0 +1,9 @@
+Options -Indexes
+
+<FilesMatch "^(config\.php|README\.txt)$">
+    Require all denied
+</FilesMatch>
+
+RewriteEngine On
+RewriteRule ^data(?:/|$) - [F,L]
+
